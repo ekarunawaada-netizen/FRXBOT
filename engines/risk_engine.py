@@ -180,17 +180,22 @@ class RiskManagementEngine:
         # 1. Compute ATR & Volatility
         atr = await self.compute_atr(ohlcv, period=atr_period)
         
-        # Determine dynamic ATR multiplier
+        # Determine dynamic ATR multipliers
         resolved_mode = mode.lower() if mode else ("scalping" if timeframe.upper() in {"M1", "M5", "M15", "M30"} else "swing")
-        if resolved_mode == "scalping":
-            if pair.upper() == "XAUUSD":
-                multiplier = 2.2
-            else:
-                multiplier = 1.5
+        
+        is_asymmetric = (pair.upper() == "XAUUSD" and resolved_mode == "scalping")
+        
+        if is_asymmetric:
+            sl_multiplier = 2.2
+            tp1_multiplier = 1.0
+            tp2_multiplier = 1.2
+            sl_distance = atr * sl_multiplier
         else:
-            multiplier = self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
-
-        sl_distance = atr * multiplier
+            if resolved_mode == "scalping":
+                multiplier = 1.5
+            else:
+                multiplier = self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
+            sl_distance = atr * multiplier
 
         # Determine precision based on pair (JPY or Gold have 2 decimals, standard forex has 5)
         is_jpy_or_gold = "JPY" in pair or pair.startswith("XAU")
@@ -206,14 +211,25 @@ class RiskManagementEngine:
         # Prevent negative SL prices
         sl_price = max(0.00001, sl_price)
 
-        # 3. Calculate Take Profit Prices (RRR 1:1.5 and 1:2.0)
         risk_dist = abs(entry_price - sl_price)
-        if direction_upper == "LONG":
-            tp1_price = entry_price + (risk_dist * 1.5)
-            tp2_price = entry_price + (risk_dist * 2.0)
+
+        # 3. Calculate Take Profit Prices
+        if is_asymmetric:
+            tp1_distance = atr * tp1_multiplier
+            tp2_distance = atr * tp2_multiplier
+            if direction_upper == "LONG":
+                tp1_price = entry_price + tp1_distance
+                tp2_price = entry_price + tp2_distance
+            else:
+                tp1_price = entry_price - tp1_distance
+                tp2_price = entry_price - tp2_distance
         else:
-            tp1_price = entry_price - (risk_dist * 1.5)
-            tp2_price = entry_price - (risk_dist * 2.0)
+            if direction_upper == "LONG":
+                tp1_price = entry_price + (risk_dist * 1.5)
+                tp2_price = entry_price + (risk_dist * 2.0)
+            else:
+                tp1_price = entry_price - (risk_dist * 1.5)
+                tp2_price = entry_price - (risk_dist * 2.0)
 
         # Prevent negative TP prices
         tp1_price = max(0.00001, tp1_price)

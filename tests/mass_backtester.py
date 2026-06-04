@@ -107,10 +107,10 @@ async def main():
                 risk_dist = abs(trade["entry_spot"] - trade["initial_sl_price"])
                 bep_triggered = False
                 if trade["direction"] == "LONG":
-                    if current_row["High"] >= trade["entry_spot"] + risk_dist:
+                    if current_row["High"] >= trade["entry_spot"] + (risk_dist * 1.5):
                         bep_triggered = True
                 else: # SHORT
-                    if current_row["Low"] <= trade["entry_spot"] - risk_dist:
+                    if current_row["Low"] <= trade["entry_spot"] - (risk_dist * 1.5):
                         bep_triggered = True
                         
                 if bep_triggered:

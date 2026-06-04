@@ -118,8 +118,10 @@ async def test_calculate_adaptive_multiplier(mock_ohlcv_data):
     )
     atr = await engine.compute_atr(mock_ohlcv_data, period=14)
     expected_dist_gold = atr * 2.2
-    # Use absolute tolerance because Gold sl_price is rounded to 2 decimals
+    expected_tp2_gold = atr * 1.2
+    # Use absolute tolerance because Gold prices are rounded to 2 decimals
     assert pytest.approx(abs(result_gold_scalping.entry_price - result_gold_scalping.sl_price), abs=0.01) == expected_dist_gold
+    assert pytest.approx(abs(result_gold_scalping.tp2_price - result_gold_scalping.entry_price), abs=0.01) == expected_tp2_gold
     
     # 2. EURUSD in scalping mode: multiplier should be 1.5
     result_eur_scalping = await engine.calculate(
