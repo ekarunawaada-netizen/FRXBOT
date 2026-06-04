@@ -145,50 +145,68 @@ async def fetch_ohlcv_raw(pair: str, tf: str, num_bars: int = 220, retries: int 
     return df
 
 
-async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> dict:
+async def fetch_ohlcv_with_backoff(pair: str, tf: str = "H1", retries: int = 3, mode: str = "swing") -> dict:
     """
-    Fetches H1 and H4 data to perform MTF structural calculations.
-    Returns a dictionary of metrics alongside the H1 DataFrame:
+    Fetches price data based on the chosen mode:
+    - swing (default): H4 macro trend (70 bars) + H1 entry setup (100 bars)
+    - scalping: M15 macro trend (70 bars) + M5 entry setup (100 bars)
+    
+    Returns a dictionary of metrics:
     {
-        "df": H1 DataFrame,
-        "h4_trend": "BULLISH" | "BEARISH",
-        "highest_high_24h": float,
-        "lowest_low_24h": float,
+        "df": Entry setup DataFrame (H1 or M5),
+        "mode": "swing" | "scalping",
+        "h4_trend": "BULLISH" | "BEARISH",  # Stores H4 or M15 EMA50 trend
+        "highest_high_24h": float,           # Stores 24h High (H1) or 3h High (M15)
+        "lowest_low_24h": float,            # Stores 24h Low (H1) or 3h Low (M15)
         "last_candle_type": "BULLISH" | "BEARISH",
         "is_rejection": bool
     }
     """
-    # 1. Fetch timeframes (H4 needs 70 bars for EMA50 calculation, H1 needs 100 bars)
-    h4_df = await fetch_ohlcv_raw(pair, "H4", num_bars=70, retries=retries)
-    h1_df = await fetch_ohlcv_raw(pair, "H1", num_bars=100, retries=retries)
-
-    if h4_df.empty or len(h4_df) < 50:
-        logger.warning(f"Insufficient H4 data for EMA50 ({len(h4_df)} bars). Fallback to BULLISH.")
-        h4_trend = "BULLISH"
+    mode_lower = mode.lower()
+    if mode_lower == "scalping":
+        # Scalping timeframes: M15 (macro) and M5 (execution)
+        macro_tf = "M15"
+        exec_tf = "M5"
+        # 12 bars of M15 = 180 min = 3h
+        lookback_bars = 12
     else:
-        # Calculate H4 EMA50
-        h4_close = h4_df["Close"].astype(float)
-        h4_ema50 = h4_close.ewm(span=50, adjust=False).mean()
-        last_h4_close = float(h4_close.iloc[-1])
-        last_h4_ema50 = float(h4_ema50.iloc[-1])
-        h4_trend = "BULLISH" if last_h4_close > last_h4_ema50 else "BEARISH"
+        # Swing timeframes: H4 (macro) and H1 (execution)
+        macro_tf = "H4"
+        exec_tf = "H1"
+        # 24 bars of H1 = 24h
+        lookback_bars = 24
 
-    if h1_df.empty or len(h1_df) < 24:
-        logger.warning(f"Insufficient H1 data for 24h metrics ({len(h1_df)} bars). Using fallback.")
-        highest_high_24h = float(h1_df["High"].max()) if not h1_df.empty else 0.0
-        lowest_low_24h = float(h1_df["Low"].min()) if not h1_df.empty else 0.0
+    # 1. Fetch timeframes (macro trend needs 70 bars for EMA50 calculation, execution needs 100 bars)
+    macro_df = await fetch_ohlcv_raw(pair, macro_tf, num_bars=70, retries=retries)
+    exec_df = await fetch_ohlcv_raw(pair, exec_tf, num_bars=100, retries=retries)
+
+    if macro_df.empty or len(macro_df) < 50:
+        logger.warning(f"Insufficient {macro_tf} data for EMA50 ({len(macro_df)} bars). Fallback to BULLISH.")
+        macro_trend = "BULLISH"
     else:
-        # 24h metrics (last 24 bars of H1)
-        h1_24 = h1_df.tail(24)
-        highest_high_24h = float(h1_24["High"].max())
-        lowest_low_24h = float(h1_24["Low"].min())
+        # Calculate EMA50 on macro timeframe
+        macro_close = macro_df["Close"].astype(float)
+        macro_ema50 = macro_close.ewm(span=50, adjust=False).mean()
+        last_macro_close = float(macro_close.iloc[-1])
+        last_macro_ema50 = float(macro_ema50.iloc[-1])
+        macro_trend = "BULLISH" if last_macro_close > last_macro_ema50 else "BEARISH"
 
-    if h1_df.empty:
+    if exec_df.empty or len(exec_df) < lookback_bars:
+        logger.warning(f"Insufficient {exec_tf} data for metrics ({len(exec_df)} bars). Using fallback.")
+        highest_high = float(exec_df["High"].max()) if not exec_df.empty else 0.0
+        lowest_low = float(exec_df["Low"].min()) if not exec_df.empty else 0.0
+    else:
+        # High/low metrics from the last lookback bars of execution TF
+        exec_tail = exec_df.tail(lookback_bars)
+        highest_high = float(exec_tail["High"].max())
+        lowest_low = float(exec_tail["Low"].min())
+
+    if exec_df.empty:
         last_candle_type = "BULLISH"
         is_rejection = False
     else:
-        # Last H1 candle type & rejection
-        last_candle = h1_df.iloc[-1]
+        # Last execution candle type & rejection
+        last_candle = exec_df.iloc[-1]
         o_val = float(last_candle["Open"])
         h_val = float(last_candle["High"])
         l_val = float(last_candle["Low"])
@@ -207,13 +225,15 @@ async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> dict
             is_rejection = False
 
     return {
-        "df": h1_df,
-        "h4_trend": h4_trend,
-        "highest_high_24h": highest_high_24h,
-        "lowest_low_24h": lowest_low_24h,
+        "df": exec_df,
+        "mode": mode_lower,
+        "h4_trend": macro_trend,
+        "highest_high_24h": highest_high,
+        "lowest_low_24h": lowest_low,
         "last_candle_type": last_candle_type,
         "is_rejection": is_rejection
     }
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════

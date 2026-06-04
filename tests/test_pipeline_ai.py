@@ -27,6 +27,14 @@ async def test_fetch_ohlcv_cache_and_fallback():
         assert res1["df"].equals(res2["df"])
 
 @pytest.mark.asyncio
+async def test_fetch_ohlcv_scalping():
+    res = await fetch_ohlcv_with_backoff("EURUSD", mode="scalping")
+    assert isinstance(res, dict)
+    assert res["mode"] == "scalping"
+    assert not res["df"].empty
+    assert "Close" in res["df"].columns
+
+@pytest.mark.asyncio
 async def test_fetch_economic_calendar():
     events = await fetch_economic_calendar()
     assert isinstance(events, list)

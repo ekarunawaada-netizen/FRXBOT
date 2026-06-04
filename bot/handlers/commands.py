@@ -98,30 +98,40 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
         await message.answer("⚠️ Anda tidak terdaftar dalam whitelist. Akses ditolak.")
         return
 
-    # 2. Extract & validate pair argument
-    pair = command.args
-    if not pair:
+    # 2. Extract & validate pair and mode arguments
+    # Format: /analisa [PAIR] [MODE]
+    args_str = command.args
+    if not args_str:
         await message.answer(
             "<b>❌ Format Salah!</b>\n"
-            "Gunakan format: <code>/analisa [NAMA_PAIR]</code>\n"
-            "Contoh: <code>/analisa EURUSD</code> atau <code>/analisa XAUUSD</code>",
+            "Gunakan format: <code>/analisa [NAMA_PAIR] [MODE]</code>\n"
+            "Contoh: <code>/analisa EURUSD scalping</code> atau <code>/analisa XAUUSD swing</code>",
             parse_mode=ParseMode.HTML
         )
         return
 
-    pair = pair.strip().upper()
+    parts = [p.strip() for p in args_str.split() if p.strip()]
+    pair = parts[0].upper()
+    
+    mode = "swing"
+    if len(parts) >= 2:
+        mode_arg = parts[1].lower()
+        if mode_arg in {"sc", "scalping"}:
+            mode = "scalping"
+        elif mode_arg in {"sw", "swing"}:
+            mode = "swing"
 
     await message.answer(
-        f"⏳ <b>FRXBOT:</b> Memulai analisis untuk <b>{pair}</b>... Silakan tunggu sebentar.",
+        f"⏳ <b>FRXBOT:</b> Memulai analisis <b>[{mode.upper()}]</b> untuk <b>{pair}</b>... Silakan tunggu sebentar.",
         parse_mode=ParseMode.HTML
     )
 
     try:
         # 3. Step A: Price Data Retrieval
-        timeframe = "H1"
-        logger.info(f"Fetching price data for {pair} {timeframe}")
+        timeframe = "M5" if mode == "scalping" else "H1"
+        logger.info(f"Fetching price data for {pair} in {mode} mode (execution TF: {timeframe})")
         try:
-            ohlcv_data = await fetch_ohlcv_with_backoff(pair, timeframe)
+            ohlcv_data = await fetch_ohlcv_with_backoff(pair, timeframe, mode=mode)
             ohlcv = ohlcv_data["df"]
         except Exception as e:
             logger.error(f"Error fetching price data for {pair}: {e}")
@@ -133,11 +143,11 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             return
 
         # 4. Step B: Technical Engine Analysis
-        logger.info(f"Analyzing technical indicators for {pair}")
+        logger.info(f"Analyzing technical indicators for {pair} in {mode} mode")
         try:
             market_regime = await tech_engine.detect_market_regime(ohlcv)
-            tech_bias_dict = await tech_engine.generate_technical_bias(ohlcv, mode="swing")
-            snr_dict = await tech_engine.calculate_snr(ohlcv, mode="swing")
+            tech_bias_dict = await tech_engine.generate_technical_bias(ohlcv, mode=mode)
+            snr_dict = await tech_engine.calculate_snr(ohlcv, mode=mode)
         except Exception as e:
             logger.error(f"Error in TechnicalEngine for {pair}: {e}")
             await message.answer("❌ Terjadi kesalahan pada Technical Engine saat menganalisis chart.")
@@ -156,7 +166,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
         entry_price = float(ohlcv["Close"].iloc[-1])
 
         # 5. Step C: AI Analysis (Technical from live data + Fundamental from calendar -> Groq)
-        logger.info(f"Running AI Technical & Fundamental analysis for {pair}")
+        logger.info(f"Running AI Technical & Fundamental analysis for {pair} in {mode} mode")
         try:
             # Compute market data context from the OHLCV already fetched
             market_data_ctx = compute_market_data_context(ohlcv, pair)
@@ -180,7 +190,8 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
                 highest_high_24h=ohlcv_data["highest_high_24h"],
                 lowest_low_24h=ohlcv_data["lowest_low_24h"],
                 last_candle_type=ohlcv_data["last_candle_type"],
-                is_rejection=ohlcv_data["is_rejection"]
+                is_rejection=ohlcv_data["is_rejection"],
+                mode=mode
             )
 
             # Normalize keys for display
@@ -285,7 +296,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             lot_size_info += " <i>(Hanya untuk simulasi jika bias berubah)</i>"
 
         response_html = (
-            f"📊 <b>LAPORAN ANALISIS TRADING AI ({pair})</b> 📊\n"
+            f"📊 <b>LAPORAN ANALISIS TRADING AI - [{mode.upper()}] ({pair})</b> 📊\n"
             f"────────────────────────\n"
             f"📈 <b>Arah Sinyal (Bias):</b> {bias_emoji} ({signal_color_text})\n"
             f"⚡ <b>Timeframe:</b> <code>{timeframe}</code> | <b>Regime:</b> <code>{market_regime}</code>\n"

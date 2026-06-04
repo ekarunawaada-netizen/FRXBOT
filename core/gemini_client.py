@@ -41,7 +41,8 @@ class GeminiAnalyseClient:
         highest_high_24h: float = 0.0,
         lowest_low_24h: float = 0.0,
         last_candle_type: str = "BULLISH",
-        is_rejection: bool = False
+        is_rejection: bool = False,
+        mode: str = "swing"
     ) -> dict:
         """
         Unified AI analysis method combining Technical + Fundamental reasoning.
@@ -76,12 +77,45 @@ class GeminiAnalyseClient:
         else:
             technical_section = "No live market data available for technical analysis."
 
-        prompt = f"""You are an Elite Quantitative Trader and Institutional Market Analyst.
-Today's date is {current_date_str}. You are analyzing: {pair}.
+        mode_lower = mode.lower()
+        if mode_lower == "scalping":
+            prompt = f"""You are an Elite Forex Scalper and Momentum Trader.
+Today's date is {current_date_str}. You are analyzing: {pair} in SCALPING mode (Execution: M5, Macro: M15).
 
 {technical_section}
 
-── Multi-Timeframe (MTF) & Structural Parameters ──
+── M5/M15 Scalping Parameters ──
+- M15 Macro Trend Bias: {h4_trend}
+- 3-Hour Highest High (Local Resistance): {highest_high_24h}
+- 3-Hour Lowest Low (Local Support): {lowest_low_24h}
+- Last M5 Candle Type: {last_candle_type}
+- Last M5 Candle Rejection Wick Detected (>40% of range): {is_rejection}
+
+{calendar_section}
+
+SCALPING INSTRUCTIONS:
+1. Analyze micro-momentum and candlestick rejections near the 3-hour High/Low key levels.
+2. Target tight spreads, fast order flow, and quick scalping pullbacks.
+3. Prioritize M15 Trend Bias: {h4_trend}. Favor quick momentum entries in that direction. If M5 is highly volatile or conflicting, suggest "WAIT".
+4. If current price is close to 3-hour support or resistance showing rejection wicks (rejection detected: {is_rejection}), suggest instant MARKET EXECUTION. Otherwise, set a BUY LIMIT or SELL LIMIT at the local 3h High/Low or key pullback spots.
+
+SYNTHESIS & FORMAT:
+- Respond with a raw, valid JSON object only. Do NOT wrap in markdown code-blocks.
+Ensure keys match exactly:
+{{
+    "sentiment": "BULLISH" or "BEARISH" or "NEUTRAL",
+    "order_type": "MARKET EXECUTION" or "BUY LIMIT" or "SELL LIMIT",
+    "entry_spot": 1.15950,
+    "bias": "BUY" or "SELL" or "WAIT",
+    "reason": "A 1-2 sentence scalping breakdown explaining the local M5/M15 momentum setup and trigger levels."
+}}"""
+        else:
+            prompt = f"""You are an Elite Institutional Forex Swing Analyst and Macro Trader.
+Today's date is {current_date_str}. You are analyzing: {pair} in SWING mode (Execution: H1, Macro: H4).
+
+{technical_section}
+
+── H1/H4 Swing Parameters ──
 - H4 Institutional Macro Trend: {h4_trend}
 - 24-Hour Highest High (Major Resistance): {highest_high_24h}
 - 24-Hour Lowest Low (Major Support): {lowest_low_24h}
@@ -90,20 +124,10 @@ Today's date is {current_date_str}. You are analyzing: {pair}.
 
 {calendar_section}
 
-ANALYSIS FRAMEWORK INSTRUCTIONS:
-
-1. SMART MONEY CONCEPTS (SMC):
-   - Review the H1 candle matrix. Identify potential Break of Structure (BOS) or Change of Character (CHoCH) if key swing highs/lows are breached.
-   - Look for Fair Value Gaps (FVG) / imbalances in the recent candle logs.
-   
-2. PRICE ACTION:
-   - Check if the current price or the last candle wicks are showing strong rejection (detected: {is_rejection}) near the 24-hour Highest High ({highest_high_24h}) or Lowest Low ({lowest_low_24h}).
-   - Analyze if there is buying pressure at major support or selling pressure at major resistance.
-
-3. MACRO DIRECTION AND CONFLICT FILTERING (CRITICAL):
-   - Prioritize the H4 Institutional Trend: {h4_trend}.
-   - If the H4 trend is BEARISH but the H1 shows minor bullish indications (e.g. temporary EMA crossover or bullish MACD), you MUST either ignore the H1 buying pressure and favor high-probability SELL setups, or output a high-conviction "WAIT" if signals are highly conflicting. Never go against the H4 macro trend.
-   - If the H4 trend is BULLISH but H1 shows a temporary bearish correction, look for buying opportunities at key support levels or output "WAIT".
+SWING INSTRUCTIONS:
+1. Evaluate major Smart Money Concepts (SMC) like Break of Structure (BOS), Change of Character (CHoCH), and Fair Value Gaps (FVG) based on the candle matrix.
+2. Prioritize the H4 Institutional Trend: {h4_trend}. Look for entries that align with this macro trend, ignoring minor H1 counter-trend breakouts.
+3. If current price is far from optimal support/resistance levels or FVG pullback zones, do NOT suggest instant entry. Instead, set a BUY LIMIT or SELL LIMIT at a premium structural level. Suggest MARKET EXECUTION only if major candle rejection or breakout occurs right now.
 
 SYNTHESIS & FORMAT:
 - Combine technical structure (SMC, Price Action, MTF alignment) with fundamental calendar catalysts.
@@ -114,8 +138,9 @@ Ensure keys match exactly:
     "order_type": "MARKET EXECUTION" or "BUY LIMIT" or "SELL LIMIT",
     "entry_spot": 1.15950,
     "bias": "BUY" or "SELL" or "WAIT",
-    "reason": "A 1-2 sentence breakdown explaining why this specific spot or limit order was chosen based on momentum."
+    "reason": "A 1-2 sentence swing analysis detailing SMC, premium pullback zones, and H4 macro alignment."
 }}"""
+
 
         try:
             loop = asyncio.get_event_loop()
