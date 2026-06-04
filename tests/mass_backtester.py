@@ -15,39 +15,43 @@ from engines.technical_engine import TechnicalEngine
 from engines.risk_engine import RiskManagementEngine
 from data.price_fetcher import compute_market_data_context
 
-async def main():
-    parser = argparse.ArgumentParser(description="AI Model Trainer & Evaluator - Mass Historical Backtester.")
-    parser.add_argument("--csv", type=str, required=True, help="Path to historical CSV file.")
-    parser.add_argument("--mode", type=str, default="swing", choices=["swing", "scalping"], help="Execution mode (swing or scalping)")
-    parser.add_argument("--mock-ai", action="store_true", help="Use mock AI responses instead of calling Groq API.")
-    parser.add_argument("--max-trades", type=int, default=50, help="Maximum number of simulated trades to execute.")
-    parser.add_argument("--start-idx", type=int, default=400, help="Starting index in the CSV to allow indicator calculation history.")
-    args = parser.parse_args()
-
-    # 1. Load CSV
-    print(f"Loading dataset: {args.csv}")
-    if not os.path.exists(args.csv):
-        print(f"Error: CSV file not found: {args.csv}")
-        sys.exit(1)
-        
-    df = pd.read_csv(args.csv)
-    df["time"] = pd.to_datetime(df["time"] if "time" in df.columns else df.iloc[:,0])
-    df = df.set_index("time").sort_index()
-
-    print(f"Loaded {len(df)} bars of historical data.")
-    
+async def run_backtest_simulation(
+    df: pd.DataFrame,
+    pair: str,
+    mode: str,
+    mock_ai: bool = True,
+    max_trades: int = 50,
+    start_idx: int = 400,
+    override_settings: dict = None,
+    verbose: bool = True
+) -> dict:
+    """
+    Runs the historical moving-window simulation and evaluates the technical & AI strategies.
+    Returns a dictionary of backtesting metrics.
+    """
     # Instantiate engines
     tech_engine = TechnicalEngine()
     risk_engine = RiskManagementEngine()
     gemini_client = GeminiAnalyseClient()
 
-    pair = os.path.basename(args.csv).split("_")[0]
-    timeframe = "M5" if args.mode == "scalping" else "H1"
+    timeframe = "M5" if mode == "scalping" else "H1"
     
+    # Load dynamic config
+    from engines.risk_engine import load_pair_settings
+    settings_dict = load_pair_settings()
+    pair_config = settings_dict.get(pair.upper(), settings_dict.get("DEFAULT", {}))
+    mode_config = pair_config.get(mode.lower(), settings_dict.get("DEFAULT", {}).get(mode.lower(), {}))
+    
+    # Apply training loop overrides if provided
+    if override_settings:
+        mode_config = {**mode_config, **override_settings}
+        
+    bep_threshold = mode_config.get("bep_trigger_threshold", 1.5)
+
     # Backtest parameters
-    pending_limit_bars = 48 if args.mode == "scalping" else 24
+    pending_limit_bars = 48 if mode == "scalping" else 24
     max_trade_duration = 120
-    pip_size = risk_engine.PIP_SIZES.get(pair, 0.0001)
+    pip_size = risk_engine.PIP_SIZES.get(pair.upper(), 0.0001)
 
     # Tracking lists
     pending_orders = []
@@ -55,14 +59,15 @@ async def main():
     closed_trades = []
     filtered_signals_count = 0
 
-    print(f"Starting moving-window simulation on {pair} ({args.mode.upper()})...")
-    print(f"Mock AI: {args.mock_ai} | Max Trades: {args.max_trades} | Start Index: {args.start_idx}")
+    if verbose:
+        print(f"Starting moving-window simulation on {pair} ({mode.upper()})...")
+        print(f"Mock AI: {mock_ai} | Max Trades: {max_trades} | Start Index: {start_idx}")
 
     # Main moving window loop
-    for i in range(args.start_idx, len(df)):
+    for i in range(start_idx, len(df)):
         # Stop generating new signals if we reached max trades
         total_trade_slots = len(closed_trades) + len(active_trades) + len(pending_orders)
-        can_trade = total_trade_slots < args.max_trades
+        can_trade = total_trade_slots < max_trades
 
         slice_df = df.iloc[:i]
         current_row = df.iloc[i]
@@ -94,7 +99,8 @@ async def main():
                 trade["fill_idx"] = i
                 trade["fill_time"] = current_time
                 active_trades.append(trade)
-                print(f"[{current_time}] ORDER TRIGGERED: {trade['direction']} {pair} at {entry_spot}")
+                if verbose:
+                    print(f"[{current_time}] ORDER TRIGGERED: {trade['direction']} {pair} at {entry_spot}")
             else:
                 still_pending.append(trade)
         pending_orders = still_pending
@@ -107,16 +113,17 @@ async def main():
                 risk_dist = abs(trade["entry_spot"] - trade["initial_sl_price"])
                 bep_triggered = False
                 if trade["direction"] == "LONG":
-                    if current_row["High"] >= trade["entry_spot"] + (risk_dist * 1.5):
+                    if current_row["High"] >= trade["entry_spot"] + (risk_dist * bep_threshold):
                         bep_triggered = True
                 else: # SHORT
-                    if current_row["Low"] <= trade["entry_spot"] - (risk_dist * 1.5):
+                    if current_row["Low"] <= trade["entry_spot"] - (risk_dist * bep_threshold):
                         bep_triggered = True
                         
                 if bep_triggered:
                     trade["bep_triggered"] = True
                     trade["sl_price"] = trade["entry_spot"]
-                    print(f"[{current_time}] AUTO-BREAKEVEN TRIGGERED for {trade['direction']} {pair} at {trade['entry_spot']}")
+                    if verbose:
+                        print(f"[{current_time}] AUTO-BREAKEVEN TRIGGERED for {trade['direction']} {pair} at {trade['entry_spot']}")
 
             # Check SL/TP hits
             sl_hit = False
@@ -145,11 +152,13 @@ async def main():
                 if trade.get("bep_triggered", False):
                     trade["pnl"] = 0.0
                     trade["outcome"] = "BREAKEVEN"
-                    print(f"[{current_time}] HIT BREAKEVEN (MUTLAK $0): {trade['direction']} {pair} PnL: 0.00 USD")
+                    if verbose:
+                        print(f"[{current_time}] HIT BREAKEVEN (MUTLAK $0): {trade['direction']} {pair} PnL: 0.00 USD")
                 else:
                     trade["pnl"] = -trade["risk_package"].risk_amount_usd
                     trade["outcome"] = "SL"
-                    print(f"[{current_time}] HIT SL: {trade['direction']} {pair} PnL: {trade['pnl']:.2f} USD")
+                    if verbose:
+                        print(f"[{current_time}] HIT SL: {trade['direction']} {pair} PnL: {trade['pnl']:.2f} USD")
                 closed_trades.append(trade)
             elif tp_hit:
                 trade["status"] = "CLOSED"
@@ -158,7 +167,8 @@ async def main():
                 trade["pnl"] = trade["risk_package"].risk_amount_usd * 2.0
                 trade["outcome"] = "TP"
                 closed_trades.append(trade)
-                print(f"[{current_time}] HIT TP: {trade['direction']} {pair} PnL: {trade['pnl']:.2f} USD")
+                if verbose:
+                    print(f"[{current_time}] HIT TP: {trade['direction']} {pair} PnL: {trade['pnl']:.2f} USD")
             elif i - trade["fill_idx"] > max_trade_duration:
                 # Time exit
                 trade["status"] = "CLOSED"
@@ -176,7 +186,8 @@ async def main():
                     
                 trade["outcome"] = "TIME_EXIT"
                 closed_trades.append(trade)
-                print(f"[{current_time}] TIME OUT EXIT: {trade['direction']} {pair} at {exit_price} PnL: {trade['pnl']:.2f} USD")
+                if verbose:
+                    print(f"[{current_time}] TIME OUT EXIT: {trade['direction']} {pair} at {exit_price} PnL: {trade['pnl']:.2f} USD")
             else:
                 still_active.append(trade)
         active_trades = still_active
@@ -186,7 +197,7 @@ async def main():
             continue
 
         # Slice timeframes
-        if args.mode == "scalping":
+        if mode == "scalping":
             exec_df = slice_df.tail(100)
             macro_df = slice_df.tail(310).resample("15min").agg({
                 "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
@@ -204,7 +215,7 @@ async def main():
             continue
 
         # Get Technical Bias
-        tech_bias = await tech_engine.generate_technical_bias(exec_df, mode=args.mode)
+        tech_bias = await tech_engine.generate_technical_bias(exec_df, mode=mode)
         tech_direction = tech_bias["direction"]
         
         # Calculate Macro Trend
@@ -222,7 +233,7 @@ async def main():
 
         # Fetch AI Bias
         entry_price = float(exec_df["Close"].iloc[-1])
-        if args.mock_ai:
+        if mock_ai:
             ai_result = {
                 "sentiment": "BULLISH" if tech_direction == "LONG" else "BEARISH",
                 "bias": "LONG" if tech_direction == "LONG" else "SHORT",
@@ -251,7 +262,8 @@ async def main():
 
             market_data_ctx = compute_market_data_context(exec_df, pair)
             
-            print(f"[{current_time}] Sending window to AI...")
+            if verbose:
+                print(f"[{current_time}] Sending window to AI...")
             try:
                 ai_result = await gemini_client.analyse_news_sentiment(
                     pair=pair,
@@ -262,10 +274,11 @@ async def main():
                     lowest_low_24h=lowest_low,
                     last_candle_type=last_candle_type,
                     is_rejection=is_rejection,
-                    mode=args.mode
+                    mode=mode
                 )
             except Exception as e:
-                print(f"AI error at {current_time}: {e}")
+                if verbose:
+                    print(f"AI error at {current_time}: {e}")
                 continue
 
         # Process AI signal
@@ -298,16 +311,18 @@ async def main():
                 capital_usd=5000.0,
                 risk_pct=1.0,
                 timeframe=timeframe,
-                mode=args.mode
+                mode=mode,
+                override_settings=override_settings
             )
         except Exception as e:
-            print(f"Risk calculations failed: {e}")
+            if verbose:
+                print(f"Risk calculations failed: {e}")
             continue
 
         # Create Trade
         trade = {
             "pair": pair,
-            "mode": args.mode,
+            "mode": mode,
             "direction": ai_bias,
             "order_type": order_type,
             "entry_spot": entry_spot,
@@ -332,10 +347,12 @@ async def main():
             trade["fill_idx"] = i
             trade["fill_time"] = current_time
             active_trades.append(trade)
-            print(f"[{current_time}] EXECUTED MARKET ORDER: {ai_bias} {pair} at {entry_spot}")
+            if verbose:
+                print(f"[{current_time}] EXECUTED MARKET ORDER: {ai_bias} {pair} at {entry_spot}")
         else:
             pending_orders.append(trade)
-            print(f"[{current_time}] PLACED LIMIT ORDER: {order_type} {pair} at {entry_spot}")
+            if verbose:
+                print(f"[{current_time}] PLACED LIMIT ORDER: {order_type} {pair} at {entry_spot}")
 
     # Complete the backtest simulation: close remaining pending/active trades at final bar
     final_time = df.index[-1]
@@ -360,7 +377,7 @@ async def main():
         trade["outcome"] = "TIME_EXIT"
         closed_trades.append(trade)
 
-    # 4. Display Stats Dashboard
+    # 4. Display Stats Dashboard Metrics
     filled_trades = [t for t in closed_trades if t["outcome"] != "CANCELLED"]
     total_trades = len(filled_trades)
     
@@ -375,23 +392,72 @@ async def main():
     gross_loss = abs(sum([t["pnl"] for t in general_losses]))
     
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
+    net_profit = gross_profit - gross_loss
 
+    return {
+        "total_placed": len(closed_trades),
+        "total_filled": total_trades,
+        "win_rate": win_rate,
+        "wins": len(wins),
+        "strict_losses": len(strict_losses),
+        "breakeven_trades": len(breakeven_trades),
+        "profit_factor": profit_factor,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "net_profit": net_profit,
+        "macro_filtered": filtered_signals_count
+    }
+
+async def main():
+    parser = argparse.ArgumentParser(description="AI Model Trainer & Evaluator - Mass Historical Backtester.")
+    parser.add_argument("--csv", type=str, required=True, help="Path to historical CSV file.")
+    parser.add_argument("--mode", type=str, default="swing", choices=["swing", "scalping"], help="Execution mode (swing or scalping)")
+    parser.add_argument("--mock-ai", action="store_true", help="Use mock AI responses instead of calling Groq API.")
+    parser.add_argument("--max-trades", type=int, default=50, help="Maximum number of simulated trades to execute.")
+    parser.add_argument("--start-idx", type=int, default=400, help="Starting index in the CSV to allow indicator calculation history.")
+    args = parser.parse_args()
+
+    # 1. Load CSV
+    print(f"Loading dataset: {args.csv}")
+    if not os.path.exists(args.csv):
+        print(f"Error: CSV file not found: {args.csv}")
+        sys.exit(1)
+        
+    df = pd.read_csv(args.csv)
+    df["time"] = pd.to_datetime(df["time"] if "time" in df.columns else df.iloc[:,0])
+    df = df.set_index("time").sort_index()
+
+    print(f"Loaded {len(df)} bars of historical data.")
+    pair = os.path.basename(args.csv).split("_")[0]
+
+    # Run simulation
+    results = await run_backtest_simulation(
+        df=df,
+        pair=pair,
+        mode=args.mode,
+        mock_ai=args.mock_ai,
+        max_trades=args.max_trades,
+        start_idx=args.start_idx,
+        verbose=True
+    )
+
+    # 4. Display Stats Dashboard
     print("\n" + "="*50)
     print("           HISTORICAL MASS BACKTEST REPORT")
     print("="*50)
     print(f"Market Instrument : {pair}")
     print(f"Analysis Mode     : {args.mode.upper()}")
     print(f"Dataset Size      : {len(df)} bars")
-    print(f"Total Placed      : {len(closed_trades)}")
-    print(f"Total Filled      : {total_trades}")
-    print(f"Win Rate %        : {win_rate:.2f}% ({len(wins)} Pure Wins / {total_trades} Filled)")
-    print(f"Total Losses      : {len(strict_losses)} (Hit Strict SL)")
-    print(f"Total Breakeven   : {len(breakeven_trades)} (Saved from being losses)")
-    print(f"Profit Factor     : {profit_factor:.2f}")
-    print(f"Gross Profit      : {gross_profit:.2f} USD")
-    print(f"Gross Loss        : {gross_loss:.2f} USD")
-    print(f"Net Profit        : {gross_profit - gross_loss:.2f} USD")
-    print(f"Macro Filtered    : {filtered_signals_count} signals")
+    print(f"Total Placed      : {results['total_placed']}")
+    print(f"Total Filled      : {results['total_filled']}")
+    print(f"Win Rate %        : {results['win_rate']:.2f}% ({results['wins']} Pure Wins / {results['total_filled']} Filled)")
+    print(f"Total Losses      : {results['strict_losses']} (Hit Strict SL)")
+    print(f"Total Breakeven   : {results['breakeven_trades']} (Saved from being losses)")
+    print(f"Profit Factor     : {results['profit_factor']:.2f}")
+    print(f"Gross Profit      : {results['gross_profit']:.2f} USD")
+    print(f"Gross Loss        : {results['gross_loss']:.2f} USD")
+    print(f"Net Profit        : {results['net_profit']:.2f} USD")
+    print(f"Macro Filtered    : {results['macro_filtered']} signals")
     print("="*50 + "\n")
 
 if __name__ == "__main__":

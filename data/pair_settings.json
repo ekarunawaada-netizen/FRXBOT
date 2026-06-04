@@ -1,0 +1,38 @@
+{
+  "XAUUSD": {
+    "scalping": {
+      "sl_atr_multiplier": 2.5,
+      "tp_atr_multiplier": 0.8,
+      "bep_trigger_threshold": 1.5
+    },
+    "swing": {
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 3.0,
+      "bep_trigger_threshold": 1.5
+    }
+  },
+  "EURUSD": {
+    "scalping": {
+      "sl_atr_multiplier": 1.5,
+      "tp_atr_multiplier": 1.5,
+      "bep_trigger_threshold": 1.5
+    },
+    "swing": {
+      "sl_atr_multiplier": 1.75,
+      "tp_atr_multiplier": 3.0,
+      "bep_trigger_threshold": 1.5
+    }
+  },
+  "DEFAULT": {
+    "scalping": {
+      "sl_atr_multiplier": 1.5,
+      "tp_atr_multiplier": 1.5,
+      "bep_trigger_threshold": 1.5
+    },
+    "swing": {
+      "sl_atr_multiplier": 1.75,
+      "tp_atr_multiplier": 3.0,
+      "bep_trigger_threshold": 1.5
+    }
+  }
+}

@@ -1,8 +1,22 @@
+import os
+import json
 import logging
 from dataclasses import dataclass
 from typing import Dict, Optional
 import pandas as pd
 import pandas_ta as ta
+
+def load_pair_settings() -> dict:
+    """Helper to dynamically load settings from pair_settings.json."""
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        settings_path = os.path.join(root_dir, "data", "pair_settings.json")
+        if os.path.exists(settings_path):
+            with open(settings_path, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading pair settings: {e}")
+    return {}
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +167,8 @@ class RiskManagementEngine:
         timeframe: str = "H1",
         quote_usd_rate: Optional[float] = None,
         atr_period: int = 14,
-        mode: Optional[str] = None
+        mode: Optional[str] = None,
+        override_settings: Optional[dict] = None
     ) -> RiskPackage:
         """
         Calculates a complete RiskPackage containing stop loss, take profit targets, and dynamic lot sizing.
@@ -169,6 +184,7 @@ class RiskManagementEngine:
             quote_usd_rate: Optional rate for cross-pair conversion.
             atr_period: Period for ATR calculation.
             mode: Optional trading mode ('scalping' or 'swing').
+            override_settings: Optional dictionary to override pair_settings.json.
 
         Returns:
             RiskPackage detailing the risk management plan.
@@ -180,22 +196,25 @@ class RiskManagementEngine:
         # 1. Compute ATR & Volatility
         atr = await self.compute_atr(ohlcv, period=atr_period)
         
-        # Determine dynamic ATR multipliers
+        # Determine dynamic multipliers from pair_settings.json
         resolved_mode = mode.lower() if mode else ("scalping" if timeframe.upper() in {"M1", "M5", "M15", "M30"} else "swing")
         
-        is_asymmetric = (pair.upper() == "XAUUSD" and resolved_mode == "scalping")
-        
-        if is_asymmetric:
-            sl_multiplier = 2.2
-            tp1_multiplier = 1.0
-            tp2_multiplier = 1.2
-            sl_distance = atr * sl_multiplier
+        if override_settings:
+            mode_config = override_settings
         else:
-            if resolved_mode == "scalping":
-                multiplier = 1.5
-            else:
-                multiplier = self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
-            sl_distance = atr * multiplier
+            settings_dict = load_pair_settings()
+            pair_upper = pair.upper()
+            pair_config = settings_dict.get(pair_upper, settings_dict.get("DEFAULT", {}))
+            mode_config = pair_config.get(resolved_mode, settings_dict.get("DEFAULT", {}).get(resolved_mode, {}))
+        
+        # Fallbacks if JSON config is missing or incomplete
+        default_sl_mult = 1.5 if resolved_mode == "scalping" else self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
+        default_tp_mult = 1.5 if resolved_mode == "scalping" else 3.0
+        
+        sl_multiplier = mode_config.get("sl_atr_multiplier", default_sl_mult)
+        tp_multiplier = mode_config.get("tp_atr_multiplier", default_tp_mult)
+        
+        sl_distance = atr * sl_multiplier
 
         # Determine precision based on pair (JPY or Gold have 2 decimals, standard forex has 5)
         is_jpy_or_gold = "JPY" in pair or pair.startswith("XAU")
@@ -214,26 +233,33 @@ class RiskManagementEngine:
         risk_dist = abs(entry_price - sl_price)
 
         # 3. Calculate Take Profit Prices
-        if is_asymmetric:
-            tp1_distance = atr * tp1_multiplier
-            tp2_distance = atr * tp2_multiplier
-            if direction_upper == "LONG":
-                tp1_price = entry_price + tp1_distance
-                tp2_price = entry_price + tp2_distance
-            else:
-                tp1_price = entry_price - tp1_distance
-                tp2_price = entry_price - tp2_distance
+        tp2_distance = atr * tp_multiplier
+        tp1_distance = atr * (tp_multiplier * 0.8)  # TP1 is 80% of TP2
+        
+        if direction_upper == "LONG":
+            tp1_price = entry_price + tp1_distance
+            tp2_price = entry_price + tp2_distance
         else:
-            if direction_upper == "LONG":
-                tp1_price = entry_price + (risk_dist * 1.5)
-                tp2_price = entry_price + (risk_dist * 2.0)
-            else:
-                tp1_price = entry_price - (risk_dist * 1.5)
-                tp2_price = entry_price - (risk_dist * 2.0)
+            tp1_price = entry_price - tp1_distance
+            tp2_price = entry_price - tp2_distance
 
         # Prevent negative TP prices
         tp1_price = max(0.00001, tp1_price)
         tp2_price = max(0.00001, tp2_price)
+
+        # Round prices to their correct precision
+        sl_price_rounded = round(sl_price, price_precision)
+        tp1_price_rounded = round(tp1_price, price_precision)
+        tp2_price_rounded = round(tp2_price, price_precision)
+        entry_price_rounded = round(entry_price, price_precision)
+
+        # Ensure TP2 is further than TP1 by at least 1 pip/unit of precision
+        if tp1_price_rounded == tp2_price_rounded:
+            precision_step = 10 ** (-price_precision)
+            if direction_upper == "LONG":
+                tp2_price_rounded = round(tp2_price_rounded + precision_step, price_precision)
+            else:
+                tp2_price_rounded = round(tp2_price_rounded - precision_step, price_precision)
 
         # 4. Pip distance & risk value calculations
         sl_pips = risk_dist / pip_size
@@ -253,10 +279,10 @@ class RiskManagementEngine:
         return RiskPackage(
             pair=pair,
             direction=direction_upper,
-            entry_price=round(entry_price, price_precision),
-            sl_price=round(sl_price, price_precision),
-            tp1_price=round(tp1_price, price_precision),
-            tp2_price=round(tp2_price, price_precision),
+            entry_price=entry_price_rounded,
+            sl_price=sl_price_rounded,
+            tp1_price=tp1_price_rounded,
+            tp2_price=tp2_price_rounded,
             lot_size=lot_size,
             sl_pips=round(sl_pips, 1),
             atr_value=round(atr, 6),
