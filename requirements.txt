@@ -1,0 +1,12 @@
+aiogram>=3.0.0
+pandas
+pandas_ta
+vectorbt
+asyncpg
+pydantic-settings
+cachetools
+numpy
+httpx
+groq
+yfinance
+MetaTrader5
