@@ -37,20 +37,14 @@ class GeminiAnalyseClient:
         pair: str,
         economic_context: str = "",
         market_data_context: str = "",
+        h4_trend: str = "BULLISH",
+        highest_high_24h: float = 0.0,
+        lowest_low_24h: float = 0.0,
+        last_candle_type: str = "BULLISH",
+        is_rejection: bool = False
     ) -> dict:
         """
         Unified AI analysis method combining Technical + Fundamental reasoning.
-        
-        Args:
-            pair: Trading instrument (e.g. 'XAUUSD', 'EURUSD').
-            economic_context: Pre-formatted text of scheduled economic events
-                              from Forex Factory XML or simulated calendar.
-            market_data_context: Pre-computed string of live price data, indicators
-                                 (EMA, RSI, MACD), and recent candle summaries
-                                 from MetaTrader 5 / Yahoo Finance.
-        
-        Returns:
-            dict with keys: sentiment, bias, reason.
         """
         if not self.client:
             return {
@@ -82,35 +76,43 @@ class GeminiAnalyseClient:
         else:
             technical_section = "No live market data available for technical analysis."
 
-        prompt = f"""You are an Elite Institutional Forex Technical & Fundamental Analyst and AI Agent.
+        prompt = f"""You are an Elite Quantitative Trader and Institutional Market Analyst.
 Today's date is {current_date_str}. You are analyzing: {pair}.
 
 {technical_section}
 
+── Multi-Timeframe (MTF) & Structural Parameters ──
+- H4 Institutional Macro Trend: {h4_trend}
+- 24-Hour Highest High (Major Resistance): {highest_high_24h}
+- 24-Hour Lowest Low (Major Support): {lowest_low_24h}
+- Last H1 Candle Type: {last_candle_type}
+- Last H1 Candle Rejection Wick Detected (>40% of range): {is_rejection}
+
 {calendar_section}
 
-INSTRUCTIONS — Perform a blended Technical + Fundamental analysis:
+ANALYSIS FRAMEWORK INSTRUCTIONS:
 
-TECHNICAL (from the live data above):
-1. Identify the current trend using EMA 20/50 alignment and price position.
-2. Evaluate momentum using RSI(14) — is the market overbought (>70), oversold (<30), or neutral?
-3. Check MACD crossover direction for momentum confirmation.
-4. Examine the last 5 candles for price action signals: break of structure, rejection wicks, engulfing patterns, or inside bars.
+1. SMART MONEY CONCEPTS (SMC):
+   - Review the H1 candle matrix. Identify potential Break of Structure (BOS) or Change of Character (CHoCH) if key swing highs/lows are breached.
+   - Look for Fair Value Gaps (FVG) / imbalances in the recent candle logs.
+   
+2. PRICE ACTION:
+   - Check if the current price or the last candle wicks are showing strong rejection (detected: {is_rejection}) near the 24-hour Highest High ({highest_high_24h}) or Lowest Low ({lowest_low_24h}).
+   - Analyze if there is buying pressure at major support or selling pressure at major resistance.
 
-FUNDAMENTAL (from the economic calendar above):
-5. Which scheduled high-impact events (if any) are likely to cause volatility for {pair}?
-6. What is the prevailing market expectation ahead of these events?
+3. MACRO DIRECTION AND CONFLICT FILTERING (CRITICAL):
+   - Prioritize the H4 Institutional Trend: {h4_trend}.
+   - If the H4 trend is BEARISH but the H1 shows minor bullish indications (e.g. temporary EMA crossover or bullish MACD), you MUST either ignore the H1 buying pressure and favor high-probability SELL setups, or output a high-conviction "WAIT" if signals are highly conflicting. Never go against the H4 macro trend.
+   - If the H4 trend is BULLISH but H1 shows a temporary bearish correction, look for buying opportunities at key support levels or output "WAIT".
 
-SYNTHESIS:
-7. Combine technical structure with fundamental catalysts to determine a high-conviction short-term directional bias.
-8. If technical and fundamental signals conflict, lean toward WAIT.
-
-You MUST respond with a raw, valid JSON object only. Do NOT wrap in markdown code-blocks.
+SYNTHESIS & FORMAT:
+- Combine technical structure (SMC, Price Action, MTF alignment) with fundamental calendar catalysts.
+- You MUST respond with a raw, valid JSON object only. Do NOT wrap in markdown code-blocks.
 Ensure keys match exactly:
 {{
     "sentiment": "BULLISH" or "BEARISH" or "NEUTRAL",
     "bias": "BUY" or "SELL" or "WAIT",
-    "reason": "1-2 sentence high-conviction breakdown blending the live chart patterns with fundamental data."
+    "reason": "1-2 sentence high-conviction breakdown blending SMC/Price Action structure with the H4 macro trend and economic events."
 }}"""
 
         try:

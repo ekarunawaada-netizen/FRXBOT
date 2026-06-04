@@ -27,7 +27,7 @@ async def check_user_allowed(user_id: int) -> bool:
     Bypasses database check if user is the designated admin.
     """
     # ── HARDCODE FAILSAFE (OVERRIDE ADMIN) ──
-    if str(user_id) == "6827317690":
+    if str(user_id) == "6827317690" or user_id in settings.admin_ids:
         return True
     try:
         return await is_user_whitelisted(user_id)
@@ -121,7 +121,8 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
         timeframe = "H1"
         logger.info(f"Fetching price data for {pair} {timeframe}")
         try:
-            ohlcv = await fetch_ohlcv_with_backoff(pair, timeframe)
+            ohlcv_data = await fetch_ohlcv_with_backoff(pair, timeframe)
+            ohlcv = ohlcv_data["df"]
         except Exception as e:
             logger.error(f"Error fetching price data for {pair}: {e}")
             await message.answer(f"❌ Gagal mengambil data harga untuk {pair}. Silakan coba lagi nanti.")
@@ -175,6 +176,11 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
                 pair,
                 economic_context=news_text,
                 market_data_context=market_data_ctx,
+                h4_trend=ohlcv_data["h4_trend"],
+                highest_high_24h=ohlcv_data["highest_high_24h"],
+                lowest_low_24h=ohlcv_data["lowest_low_24h"],
+                last_candle_type=ohlcv_data["last_candle_type"],
+                is_rejection=ohlcv_data["is_rejection"]
             )
 
             # Normalize keys for display

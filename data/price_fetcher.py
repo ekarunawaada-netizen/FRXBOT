@@ -83,22 +83,15 @@ class RateLimitError(Exception):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> pd.DataFrame:
+async def fetch_ohlcv_raw(pair: str, tf: str, num_bars: int = 220, retries: int = 3) -> pd.DataFrame:
     """
-    Fetches OHLCV data with TTL caching and multi-provider waterfall:
-    
-      1. MetaTrader 5 (primary — live broker feed, requires MT5 terminal running)
-      2. Yahoo Finance (secondary — free, no API key)
-      3. Alpha Vantage (tertiary — if key configured)
-      4. Synthetic data (last resort — offline/test environments)
-    
-    Returns:
-        pd.DataFrame with columns: Open, High, Low, Close, Volume
+    Fetches raw OHLCV DataFrame using the waterfall method.
     """
-    cache, key = _get_cache_and_key(pair, tf)
+    cache, key = _get_cache_and_key(pair, f"{tf}_{num_bars}")
 
     # Cache hit
     if key in cache:
@@ -107,7 +100,7 @@ async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> pd.D
 
     # ── Provider 1: MetaTrader 5 ──
     try:
-        df = await _fetch_from_mt5(pair, tf)
+        df = await _fetch_from_mt5(pair, tf, num_bars=num_bars)
         if df is not None and not df.empty:
             cache[key] = df
             logger.info(f"Successfully fetched {len(df)} bars for {key} via MetaTrader 5.")
@@ -118,7 +111,7 @@ async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> pd.D
     # ── Provider 2: Yahoo Finance ──
     for attempt in range(retries):
         try:
-            df = await _fetch_from_yfinance(pair, tf)
+            df = await _fetch_from_yfinance(pair, tf, num_bars=num_bars)
             if df is not None and not df.empty:
                 cache[key] = df
                 logger.info(f"Successfully fetched {len(df)} bars for {key} via Yahoo Finance.")
@@ -137,6 +130,8 @@ async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> pd.D
             logger.info(f"Attempting Alpha Vantage fallback for {key}...")
             df = await _fetch_from_alpha_vantage(pair, tf)
             if df is not None and not df.empty:
+                if len(df) > num_bars:
+                    df = df.tail(num_bars)
                 cache[key] = df
                 logger.info(f"Successfully fetched {len(df)} bars for {key} via Alpha Vantage.")
                 return df
@@ -145,9 +140,80 @@ async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> pd.D
 
     # ── Provider 4: Synthetic ──
     logger.error(f"All providers failed for {key}. Using synthetic data fallback.")
-    df = _generate_synthetic_ohlcv(pair, tf)
+    df = _generate_synthetic_ohlcv(pair, tf, num_bars=num_bars)
     cache[key] = df
     return df
+
+
+async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> dict:
+    """
+    Fetches H1 and H4 data to perform MTF structural calculations.
+    Returns a dictionary of metrics alongside the H1 DataFrame:
+    {
+        "df": H1 DataFrame,
+        "h4_trend": "BULLISH" | "BEARISH",
+        "highest_high_24h": float,
+        "lowest_low_24h": float,
+        "last_candle_type": "BULLISH" | "BEARISH",
+        "is_rejection": bool
+    }
+    """
+    # 1. Fetch timeframes (H4 needs 70 bars for EMA50 calculation, H1 needs 100 bars)
+    h4_df = await fetch_ohlcv_raw(pair, "H4", num_bars=70, retries=retries)
+    h1_df = await fetch_ohlcv_raw(pair, "H1", num_bars=100, retries=retries)
+
+    if h4_df.empty or len(h4_df) < 50:
+        logger.warning(f"Insufficient H4 data for EMA50 ({len(h4_df)} bars). Fallback to BULLISH.")
+        h4_trend = "BULLISH"
+    else:
+        # Calculate H4 EMA50
+        h4_close = h4_df["Close"].astype(float)
+        h4_ema50 = h4_close.ewm(span=50, adjust=False).mean()
+        last_h4_close = float(h4_close.iloc[-1])
+        last_h4_ema50 = float(h4_ema50.iloc[-1])
+        h4_trend = "BULLISH" if last_h4_close > last_h4_ema50 else "BEARISH"
+
+    if h1_df.empty or len(h1_df) < 24:
+        logger.warning(f"Insufficient H1 data for 24h metrics ({len(h1_df)} bars). Using fallback.")
+        highest_high_24h = float(h1_df["High"].max()) if not h1_df.empty else 0.0
+        lowest_low_24h = float(h1_df["Low"].min()) if not h1_df.empty else 0.0
+    else:
+        # 24h metrics (last 24 bars of H1)
+        h1_24 = h1_df.tail(24)
+        highest_high_24h = float(h1_24["High"].max())
+        lowest_low_24h = float(h1_24["Low"].min())
+
+    if h1_df.empty:
+        last_candle_type = "BULLISH"
+        is_rejection = False
+    else:
+        # Last H1 candle type & rejection
+        last_candle = h1_df.iloc[-1]
+        o_val = float(last_candle["Open"])
+        h_val = float(last_candle["High"])
+        l_val = float(last_candle["Low"])
+        c_val = float(last_candle["Close"])
+        
+        last_candle_type = "BULLISH" if c_val > o_val else "BEARISH"
+        
+        total_range = h_val - l_val
+        if total_range > 0:
+            body_max = max(o_val, c_val)
+            body_min = min(o_val, c_val)
+            upper_shadow = h_val - body_max
+            lower_shadow = body_min - l_val
+            is_rejection = (upper_shadow / total_range > 0.4) or (lower_shadow / total_range > 0.4)
+        else:
+            is_rejection = False
+
+    return {
+        "df": h1_df,
+        "h4_trend": h4_trend,
+        "highest_high_24h": highest_high_24h,
+        "lowest_low_24h": lowest_low_24h,
+        "last_candle_type": last_candle_type,
+        "is_rejection": is_rejection
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -157,13 +223,6 @@ async def fetch_ohlcv_with_backoff(pair: str, tf: str, retries: int = 3) -> pd.D
 async def _fetch_from_mt5(pair: str, tf: str, num_bars: int = 220) -> pd.DataFrame:
     """
     Fetches live OHLCV data from the MetaTrader 5 terminal.
-    
-    Requires:
-      - MetaTrader5 Python package installed
-      - MT5 terminal application running on the Windows desktop
-      - The requested symbol available in the broker's market watch
-    
-    Runs the synchronous MT5 calls in a thread executor.
     """
     loop = asyncio.get_event_loop()
 
@@ -216,15 +275,6 @@ async def _fetch_from_mt5(pair: str, tf: str, num_bars: int = 220) -> pd.DataFra
 def compute_market_data_context(df: pd.DataFrame, pair: str) -> str:
     """
     Computes a human-readable market data context string from an OHLCV DataFrame.
-    
-    Includes:
-      - Current price, session high/low
-      - EMA 20/50 trend alignment
-      - RSI (14-period)
-      - MACD line vs signal
-      - Last 5 candle OHLC summary
-    
-    This string is passed to the Groq AI agent for technical reasoning.
     """
     if df is None or df.empty or len(df) < 50:
         return "Insufficient market data for technical context."
@@ -295,10 +345,9 @@ def compute_market_data_context(df: pd.DataFrame, pair: str) -> str:
 # PROVIDER: Yahoo Finance
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _fetch_from_yfinance(pair: str, tf: str) -> pd.DataFrame:
+async def _fetch_from_yfinance(pair: str, tf: str, num_bars: int = 220) -> pd.DataFrame:
     """
     Fetches OHLCV data from Yahoo Finance using the yfinance library.
-    Runs the synchronous yfinance download in a thread executor.
     """
     import yfinance as yf
 
@@ -339,8 +388,8 @@ async def _fetch_from_yfinance(pair: str, tf: str) -> pd.DataFrame:
             "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum",
         }).dropna()
 
-    if len(df) > 220:
-        df = df.tail(220)
+    if len(df) > num_bars:
+        df = df.tail(num_bars)
 
     return df
 
@@ -396,12 +445,12 @@ async def _fetch_from_alpha_vantage(pair: str, tf: str) -> pd.DataFrame:
 # FALLBACK: Synthetic Data
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _generate_synthetic_ohlcv(pair: str, tf: str) -> pd.DataFrame:
+def _generate_synthetic_ohlcv(pair: str, tf: str, num_bars: int = 220) -> pd.DataFrame:
     """Generates realistic synthetic OHLCV bars for offline testing and fallback."""
     logger.info(f"Generating synthetic OHLCV data for {pair} ({tf})")
 
     np.random.seed(42)
-    rows = 220
+    rows = num_bars
     start_price = 150.0 if "JPY" in pair else (2300.0 if pair.startswith("XAU") else 1.0800)
 
     close_prices = start_price + np.cumsum(np.random.normal(0, start_price * 0.001, size=rows))
@@ -415,3 +464,4 @@ def _generate_synthetic_ohlcv(pair: str, tf: str) -> pd.DataFrame:
     }
     date_range = pd.date_range(end=pd.Timestamp.now(), periods=rows, freq="h")
     return pd.DataFrame(data, index=date_range)
+

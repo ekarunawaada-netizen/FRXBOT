@@ -11,16 +11,20 @@ from core.gemini_client import GeminiRateLimiter, GeminiAnalyseClient
 async def test_fetch_ohlcv_cache_and_fallback():
     # Test fallback to synthetic generator and caching
     # Call 1 (miss cache, generates synthetic)
-    df1 = await fetch_ohlcv_with_backoff("EURUSD", "M15")
-    assert isinstance(df1, pd.DataFrame)
-    assert not df1.empty
-    assert "Close" in df1.columns
+    res1 = await fetch_ohlcv_with_backoff("EURUSD", "M15")
+    assert isinstance(res1, dict)
+    assert "df" in res1
+    assert isinstance(res1["df"], pd.DataFrame)
+    assert not res1["df"].empty
+    assert "Close" in res1["df"].columns
+    assert "h4_trend" in res1
+    assert "highest_high_24h" in res1
 
     # Call 2 (hit cache, fast)
     with patch("data.price_fetcher._generate_synthetic_ohlcv") as mock_gen:
-        df2 = await fetch_ohlcv_with_backoff("EURUSD", "M15")
+        res2 = await fetch_ohlcv_with_backoff("EURUSD", "M15")
         mock_gen.assert_not_called()
-        assert df1.equals(df2)
+        assert res1["df"].equals(res2["df"])
 
 @pytest.mark.asyncio
 async def test_fetch_economic_calendar():
