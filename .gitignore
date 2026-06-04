@@ -60,3 +60,7 @@ yarn-error.log*
 # Operating System files
 .DS_Store
 Thumbs.db
+
+# Project-specific downloaded data
+data/*.csv
+
