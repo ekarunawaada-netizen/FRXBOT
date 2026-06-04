@@ -210,15 +210,28 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             ai_sentiment_dict = {
                 "sentiment": "NEUTRAL",
                 "bias": "WAIT",
-                "summary": f"Failed to perform AI analysis due to unexpected error: {str(e)}"
+                "order_type": "MARKET EXECUTION",
+                "entry_spot": entry_price,
+                "reason": f"Failed to perform AI analysis due to unexpected error: {str(e)}"
             }
 
         ai_sentiment = ai_sentiment_dict.get("sentiment", "NEUTRAL")
         ai_bias = ai_sentiment_dict.get("bias", "WAIT")
-        ai_summary = html.escape(ai_sentiment_dict.get("summary", "N/A"))
+        ai_summary = html.escape(ai_sentiment_dict.get("reason", ai_sentiment_dict.get("summary", "N/A")))
+        order_type = ai_sentiment_dict.get("order_type", "MARKET EXECUTION")
+        
+        # Resolve entry spot
+        entry_spot = ai_sentiment_dict.get("entry_spot")
+        if entry_spot is None:
+            entry_spot = entry_price
+        else:
+            try:
+                entry_spot = float(entry_spot)
+            except (ValueError, TypeError):
+                entry_spot = entry_price
 
         # 6. Step D: Risk Management Sizing
-        logger.info(f"Running risk management calculations for {pair}")
+        logger.info(f"Running risk management calculations for {pair} at entry {entry_spot}")
         # Resolve trading direction for risk engine (if WAIT, default to LONG to compute dummy risk levels gracefully)
         risk_direction = tech_direction if tech_direction in {"LONG", "SHORT"} else "LONG"
         
@@ -226,7 +239,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             risk_package = await risk_engine.calculate(
                 pair=pair,
                 direction=risk_direction,
-                entry_price=entry_price,
+                entry_price=entry_spot,
                 ohlcv=ohlcv,
                 capital_usd=settings.default_capital_usd,
                 risk_pct=settings.default_risk_pct,
@@ -255,7 +268,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
         sl_display = f"{risk_package.sl_price:.5f}" if entry_price < 10 else f"{risk_package.sl_price:.2f}"
         tp1_display = f"{risk_package.tp1_price:.5f}" if entry_price < 10 else f"{risk_package.tp1_price:.2f}"
         tp2_display = f"{risk_package.tp2_price:.5f}" if entry_price < 10 else f"{risk_package.tp2_price:.2f}"
-        entry_display = f"{entry_price:.5f}" if entry_price < 10 else f"{entry_price:.2f}"
+        entry_display = f"{entry_spot:.5f}" if entry_price < 10 else f"{entry_spot:.2f}"
 
         # If it's a WAIT regime or WAIT bias, lot sizing is computed but we warn that trade is not active
         lot_size_info = f"<b>{risk_package.lot_size} Lots</b>"
@@ -267,7 +280,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             f"────────────────────────\n"
             f"📈 <b>Arah Sinyal (Bias):</b> {bias_emoji} ({signal_color_text})\n"
             f"⚡ <b>Timeframe:</b> <code>{timeframe}</code> | <b>Regime:</b> <code>{market_regime}</code>\n"
-            f"🎯 <b>Entry Price:</b> <code>{entry_display}</code>\n\n"
+            f"🎯 <b>Entry Strategy:</b> {order_type} @ <code>{entry_display}</code>\n\n"
             
             f"🛡️ <b>Rencana Manajemen Risiko:</b>\n"
             f"• <b>Stop Loss (SL):</b> <code>{sl_display}</code> (~{risk_package.sl_pips} pips)\n"
@@ -275,13 +288,13 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             f"• <b>Take Profit 2 (TP2):</b> <code>{tp2_display}</code>\n"
             f"• <b>Ukuran Lot Aman:</b> {lot_size_info}\n"
             f"• <b>Modal Default:</b> <code>${settings.default_capital_usd:.2f}</code> (Resiko: {settings.default_risk_pct}%)\n\n"
-
+            
             f"🔍 <b>Analisis Teknikal:</b>\n"
             f"• <b>Confluence Score:</b> <code>{confluence_score}%</code>\n"
             f"• <b>Support Terdekat:</b> <code>{supports_str}</code>\n"
             f"• <b>Resistance Terdekat:</b> <code>{resistances_str}</code>\n"
             f"• <b>Detail Teknikal:</b> <i>{html.escape(tech_reason)}</i>\n\n"
-
+            
             f"🧠 <b>Analisis Fundamental (Gemini AI):</b>\n"
             f"• <b>Sentimen Berita:</b> <b>{ai_sentiment}</b>\n"
             f"• <b>Bias Fundamental:</b> <b>{ai_bias}</b>\n"

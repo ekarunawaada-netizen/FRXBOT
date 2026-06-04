@@ -67,6 +67,8 @@ async def test_gemini_analyse_client_mock():
         assert res["sentiment"] == "BULLISH"
         assert res["bias"] == "LONG"
         assert "MOCK" in res["summary"]
+        assert "order_type" in res
+        assert res["entry_spot"] == 1.08500
     finally:
         settings.groq_api_key = orig_groq
         settings.gemini_api_key = orig_gemini

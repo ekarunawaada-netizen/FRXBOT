@@ -111,8 +111,10 @@ SYNTHESIS & FORMAT:
 Ensure keys match exactly:
 {{
     "sentiment": "BULLISH" or "BEARISH" or "NEUTRAL",
+    "order_type": "MARKET EXECUTION" or "BUY LIMIT" or "SELL LIMIT",
+    "entry_spot": 1.15950,
     "bias": "BUY" or "SELL" or "WAIT",
-    "reason": "1-2 sentence high-conviction breakdown blending SMC/Price Action structure with the H4 macro trend and economic events."
+    "reason": "A 1-2 sentence breakdown explaining why this specific spot or limit order was chosen based on momentum."
 }}"""
 
         try:
@@ -128,12 +130,28 @@ Ensure keys match exactly:
             )
             
             raw_content = completion.choices[0].message.content
-            return json.loads(raw_content)
+            parsed = json.loads(raw_content)
+            
+            # Ensure safety defaults
+            if "order_type" not in parsed:
+                parsed["order_type"] = "MARKET EXECUTION"
+            if "entry_spot" not in parsed:
+                # We can fallback to the current price if available, parsed as float
+                parsed["entry_spot"] = float(highest_high_24h + lowest_low_24h) / 2.0 if highest_high_24h > 0 else 1.08500
+            else:
+                try:
+                    parsed["entry_spot"] = float(parsed["entry_spot"])
+                except (ValueError, TypeError):
+                    parsed["entry_spot"] = 1.08500
+            
+            return parsed
 
         except Exception as e:
             logger.error(f"Groq Agent failed to parse sentiment: {e}")
             return {
                 "sentiment": "NEUTRAL",
+                "order_type": "MARKET EXECUTION",
+                "entry_spot": 1.08500,
                 "bias": "WAIT",
                 "reason": f"Agent engine temporary calculation error: {str(e)}"
             }
@@ -141,10 +159,6 @@ Ensure keys match exactly:
     async def analyze_market_news(self, news_text: str) -> Dict[str, Any]:
         """
         Legacy method called by test suite. Normalizes the output.
-        
-        - Maps "reason" to "summary" (and vice versa)
-        - Maps bias: BUY/LONG -> LONG, SELL/SHORT -> SHORT, else WAIT
-        - Maps sentiment: BULLISH/BULL -> BULLISH, BEARISH/BEAR -> BEARISH, else NEUTRAL
         """
         if not self.client or not news_text or "MOCK" in (news_text or ""):
             result = self._generate_mock_analysis(news_text)
@@ -178,6 +192,11 @@ Ensure keys match exactly:
         else:
             result["sentiment"] = "NEUTRAL"
 
+        if "order_type" not in result:
+            result["order_type"] = "MARKET EXECUTION"
+        if "entry_spot" not in result:
+            result["entry_spot"] = 1.08500
+
         return result
 
     def _generate_mock_analysis(self, news_text: str) -> Dict[str, Any]:
@@ -189,17 +208,24 @@ Ensure keys match exactly:
             return {
                 "sentiment": "BULLISH",
                 "bias": "LONG",
+                "order_type": "MARKET EXECUTION",
+                "entry_spot": 1.08500,
                 "summary": "[MOCK AI] Employment data shows solid growth. Yields rising and support currency strength."
             }
         elif "weak" in news_lower or "dovish" in news_lower or "bearish" in news_lower:
             return {
                 "sentiment": "BEARISH",
                 "bias": "SHORT",
+                "order_type": "MARKET EXECUTION",
+                "entry_spot": 1.08500,
                 "summary": "[MOCK AI] Softer data print fuels interest rate cut expectations, weighing down the currency."
             }
         else:
             return {
                 "sentiment": "NEUTRAL",
                 "bias": "WAIT",
+                "order_type": "MARKET EXECUTION",
+                "entry_spot": 1.08500,
                 "summary": "[MOCK AI] Mixed indicators; no high-impact events currently aligning for direction."
             }
+
