@@ -100,3 +100,51 @@ async def test_calculate_short_jpy(mock_ohlcv_data):
     
     # Check proper JPY precision (2 decimals)
     assert len(str(result.sl_price).split(".")[1]) <= 2
+
+@pytest.mark.asyncio
+async def test_calculate_adaptive_multiplier(mock_ohlcv_data):
+    engine = RiskManagementEngine()
+    
+    # 1. Gold (XAUUSD) in scalping mode: multiplier should be 2.2
+    result_gold_scalping = await engine.calculate(
+        pair="XAUUSD",
+        direction="LONG",
+        entry_price=2000.00,
+        ohlcv=mock_ohlcv_data,
+        capital_usd=5000.0,
+        risk_pct=1.0,
+        timeframe="M5",
+        mode="scalping"
+    )
+    atr = await engine.compute_atr(mock_ohlcv_data, period=14)
+    expected_dist_gold = atr * 2.2
+    # Use absolute tolerance because Gold sl_price is rounded to 2 decimals
+    assert pytest.approx(abs(result_gold_scalping.entry_price - result_gold_scalping.sl_price), abs=0.01) == expected_dist_gold
+    
+    # 2. EURUSD in scalping mode: multiplier should be 1.5
+    result_eur_scalping = await engine.calculate(
+        pair="EURUSD",
+        direction="LONG",
+        entry_price=1.0800,
+        ohlcv=mock_ohlcv_data,
+        capital_usd=5000.0,
+        risk_pct=1.0,
+        timeframe="M5",
+        mode="scalping"
+    )
+    expected_dist_eur = atr * 1.5
+    assert pytest.approx(abs(result_eur_scalping.entry_price - result_eur_scalping.sl_price), rel=1e-3) == expected_dist_eur
+
+    # 3. Gold in swing mode: multiplier should default to H1 (1.75)
+    result_gold_swing = await engine.calculate(
+        pair="XAUUSD",
+        direction="LONG",
+        entry_price=2000.00,
+        ohlcv=mock_ohlcv_data,
+        capital_usd=5000.0,
+        risk_pct=1.0,
+        timeframe="H1",
+        mode="swing"
+    )
+    expected_dist_gold_swing = atr * 1.75
+    assert pytest.approx(abs(result_gold_swing.entry_price - result_gold_swing.sl_price), abs=0.01) == expected_dist_gold_swing

@@ -152,7 +152,8 @@ class RiskManagementEngine:
         risk_pct: float,
         timeframe: str = "H1",
         quote_usd_rate: Optional[float] = None,
-        atr_period: int = 14
+        atr_period: int = 14,
+        mode: Optional[str] = None
     ) -> RiskPackage:
         """
         Calculates a complete RiskPackage containing stop loss, take profit targets, and dynamic lot sizing.
@@ -167,6 +168,7 @@ class RiskManagementEngine:
             timeframe: Timeframe of the signal (determines the ATR multiplier).
             quote_usd_rate: Optional rate for cross-pair conversion.
             atr_period: Period for ATR calculation.
+            mode: Optional trading mode ('scalping' or 'swing').
 
         Returns:
             RiskPackage detailing the risk management plan.
@@ -177,7 +179,17 @@ class RiskManagementEngine:
 
         # 1. Compute ATR & Volatility
         atr = await self.compute_atr(ohlcv, period=atr_period)
-        multiplier = self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
+        
+        # Determine dynamic ATR multiplier
+        resolved_mode = mode.lower() if mode else ("scalping" if timeframe.upper() in {"M1", "M5", "M15", "M30"} else "swing")
+        if resolved_mode == "scalping":
+            if pair.upper() == "XAUUSD":
+                multiplier = 2.2
+            else:
+                multiplier = 1.5
+        else:
+            multiplier = self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
+
         sl_distance = atr * multiplier
 
         # Determine precision based on pair (JPY or Gold have 2 decimals, standard forex has 5)

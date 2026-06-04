@@ -264,7 +264,8 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
                 capital_usd=settings.default_capital_usd,
                 risk_pct=settings.default_risk_pct,
                 timeframe=timeframe,
-                atr_period=settings.default_atr_period
+                atr_period=settings.default_atr_period,
+                mode=mode
             )
         except Exception as e:
             logger.error(f"Error in RiskManagementEngine for {pair}: {e}")

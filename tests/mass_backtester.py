@@ -102,6 +102,22 @@ async def main():
         # 2. Update active trades
         still_active = []
         for trade in active_trades:
+            # Check Auto-Breakeven (BEP) trigger condition
+            if not trade.get("bep_triggered", False):
+                risk_dist = abs(trade["entry_spot"] - trade["initial_sl_price"])
+                bep_triggered = False
+                if trade["direction"] == "LONG":
+                    if current_row["High"] >= trade["entry_spot"] + risk_dist:
+                        bep_triggered = True
+                else: # SHORT
+                    if current_row["Low"] <= trade["entry_spot"] - risk_dist:
+                        bep_triggered = True
+                        
+                if bep_triggered:
+                    trade["bep_triggered"] = True
+                    trade["sl_price"] = trade["entry_spot"]
+                    print(f"[{current_time}] AUTO-BREAKEVEN TRIGGERED for {trade['direction']} {pair} at {trade['entry_spot']}")
+
             # Check SL/TP hits
             sl_hit = False
             tp_hit = False
@@ -126,10 +142,15 @@ async def main():
                 trade["status"] = "CLOSED"
                 trade["exit_price"] = trade["sl_price"]
                 trade["exit_time"] = current_time
-                trade["pnl"] = -trade["risk_package"].risk_amount_usd
-                trade["outcome"] = "SL"
+                if trade.get("bep_triggered", False):
+                    trade["pnl"] = 0.0
+                    trade["outcome"] = "BREAKEVEN"
+                    print(f"[{current_time}] HIT BREAKEVEN (MUTLAK $0): {trade['direction']} {pair} PnL: 0.00 USD")
+                else:
+                    trade["pnl"] = -trade["risk_package"].risk_amount_usd
+                    trade["outcome"] = "SL"
+                    print(f"[{current_time}] HIT SL: {trade['direction']} {pair} PnL: {trade['pnl']:.2f} USD")
                 closed_trades.append(trade)
-                print(f"[{current_time}] HIT SL: {trade['direction']} {pair} PnL: {trade['pnl']:.2f} USD")
             elif tp_hit:
                 trade["status"] = "CLOSED"
                 trade["exit_price"] = trade["tp_price"]
@@ -146,11 +167,12 @@ async def main():
                 trade["exit_time"] = current_time
                 entry_spot = trade["entry_spot"]
                 
-                # Proportional PnL
+                # Proportional PnL using initial_sl_price to avoid division by zero
+                initial_sl = trade.get("initial_sl_price", trade["sl_price"])
                 if trade["direction"] == "LONG":
-                    trade["pnl"] = trade["risk_package"].risk_amount_usd * (exit_price - entry_spot) / (entry_spot - trade["sl_price"])
+                    trade["pnl"] = trade["risk_package"].risk_amount_usd * (exit_price - entry_spot) / (entry_spot - initial_sl)
                 else:
-                    trade["pnl"] = trade["risk_package"].risk_amount_usd * (entry_spot - exit_price) / (trade["sl_price"] - entry_spot)
+                    trade["pnl"] = trade["risk_package"].risk_amount_usd * (entry_spot - exit_price) / (initial_sl - entry_spot)
                     
                 trade["outcome"] = "TIME_EXIT"
                 closed_trades.append(trade)
@@ -275,7 +297,8 @@ async def main():
                 ohlcv=exec_df,
                 capital_usd=5000.0,
                 risk_pct=1.0,
-                timeframe=timeframe
+                timeframe=timeframe,
+                mode=args.mode
             )
         except Exception as e:
             print(f"Risk calculations failed: {e}")
@@ -289,6 +312,8 @@ async def main():
             "order_type": order_type,
             "entry_spot": entry_spot,
             "sl_price": risk_package.sl_price,
+            "initial_sl_price": risk_package.sl_price,
+            "bep_triggered": False,
             "tp_price": risk_package.tp2_price,
             "risk_package": risk_package,
             "status": "PENDING",
@@ -327,10 +352,11 @@ async def main():
         trade["exit_price"] = final_close
         trade["exit_time"] = final_time
         entry_spot = trade["entry_spot"]
+        initial_sl = trade.get("initial_sl_price", trade["sl_price"])
         if trade["direction"] == "LONG":
-            trade["pnl"] = trade["risk_package"].risk_amount_usd * (final_close - entry_spot) / (entry_spot - trade["sl_price"])
+            trade["pnl"] = trade["risk_package"].risk_amount_usd * (final_close - entry_spot) / (entry_spot - initial_sl)
         else:
-            trade["pnl"] = trade["risk_package"].risk_amount_usd * (entry_spot - final_close) / (trade["sl_price"] - entry_spot)
+            trade["pnl"] = trade["risk_package"].risk_amount_usd * (entry_spot - final_close) / (initial_sl - entry_spot)
         trade["outcome"] = "TIME_EXIT"
         closed_trades.append(trade)
 
@@ -339,12 +365,14 @@ async def main():
     total_trades = len(filled_trades)
     
     wins = [t for t in filled_trades if t["pnl"] > 0]
-    losses = [t for t in filled_trades if t["pnl"] < 0]
+    strict_losses = [t for t in filled_trades if t["outcome"] == "SL"]
+    breakeven_trades = [t for t in filled_trades if t["outcome"] == "BREAKEVEN"]
+    general_losses = [t for t in filled_trades if t["pnl"] < 0]
     
     win_rate = (len(wins) / total_trades * 100.0) if total_trades > 0 else 0.0
     
     gross_profit = sum([t["pnl"] for t in wins])
-    gross_loss = abs(sum([t["pnl"] for t in losses]))
+    gross_loss = abs(sum([t["pnl"] for t in general_losses]))
     
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
 
@@ -356,7 +384,9 @@ async def main():
     print(f"Dataset Size      : {len(df)} bars")
     print(f"Total Placed      : {len(closed_trades)}")
     print(f"Total Filled      : {total_trades}")
-    print(f"Win Rate %        : {win_rate:.2f}% ({len(wins)} W / {len(losses)} L)")
+    print(f"Win Rate %        : {win_rate:.2f}% ({len(wins)} Pure Wins / {total_trades} Filled)")
+    print(f"Total Losses      : {len(strict_losses)} (Hit Strict SL)")
+    print(f"Total Breakeven   : {len(breakeven_trades)} (Saved from being losses)")
     print(f"Profit Factor     : {profit_factor:.2f}")
     print(f"Gross Profit      : {gross_profit:.2f} USD")
     print(f"Gross Loss        : {gross_loss:.2f} USD")
