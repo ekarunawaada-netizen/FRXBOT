@@ -232,8 +232,17 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
 
         # 6. Step D: Risk Management Sizing
         logger.info(f"Running risk management calculations for {pair} at entry {entry_spot}")
-        # Resolve trading direction for risk engine (if WAIT, default to LONG to compute dummy risk levels gracefully)
-        risk_direction = tech_direction if tech_direction in {"LONG", "SHORT"} else "LONG"
+        # Resolve trading direction for risk engine based on AI bias and order type
+        ai_bias_upper = str(ai_bias).upper()
+        order_type_upper = str(order_type).upper()
+        
+        if "BUY" in ai_bias_upper or "LONG" in ai_bias_upper or "BUY" in order_type_upper or "LIMIT" in order_type_upper and "BUY" in order_type_upper:
+            risk_direction = "LONG"
+        elif "SELL" in ai_bias_upper or "SHORT" in ai_bias_upper or "SELL" in order_type_upper or "LIMIT" in order_type_upper and "SELL" in order_type_upper:
+            risk_direction = "SHORT"
+        else:
+            # Fallback to tech direction if AI bias is WAIT/NEUTRAL
+            risk_direction = tech_direction if tech_direction in {"LONG", "SHORT"} else "LONG"
         
         try:
             risk_package = await risk_engine.calculate(
@@ -252,9 +261,9 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             return
 
         # 7. Format & Send Response
-        # Adjust signal display based on bias direction
-        final_direction = tech_direction
-        if final_direction == "WAIT":
+        # Adjust signal display based on the resolved trading direction
+        final_direction = risk_direction
+        if ai_bias == "WAIT":
             bias_emoji = "🟡 WAIT/NEUTRAL"
             signal_color_text = "⏳ Menunggu Konfirmasi / Tidak Ada Sinyal Masuk"
         elif final_direction == "LONG":
