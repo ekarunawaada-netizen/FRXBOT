@@ -1,22 +1,11 @@
 import os
-import json
 import logging
 from dataclasses import dataclass
 from typing import Dict, Optional
 import pandas as pd
 import pandas_ta as ta
 
-def load_pair_settings() -> dict:
-    """Helper to dynamically load settings from pair_settings.json."""
-    try:
-        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        settings_path = os.path.join(root_dir, "data", "pair_settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r") as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading pair settings: {e}")
-    return {}
+from core.database_manager import get_active_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -196,23 +185,35 @@ class RiskManagementEngine:
         # 1. Compute ATR & Volatility
         atr = await self.compute_atr(ohlcv, period=atr_period)
         
-        # Determine dynamic multipliers from pair_settings.json
+        # Determine dynamic multipliers from SQLite brain database
         resolved_mode = mode.lower() if mode else ("scalping" if timeframe.upper() in {"M1", "M5", "M15", "M30"} else "swing")
-        
+
         if override_settings:
-            mode_config = override_settings
+            # Backtest / manual override path — used by the training loop
+            sl_multiplier = override_settings.get("sl_atr_multiplier", 2.0)
+            tp_multiplier = override_settings.get("tp_atr_multiplier", 2.0)
         else:
-            settings_dict = load_pair_settings()
-            pair_upper = pair.upper()
-            pair_config = settings_dict.get(pair_upper, settings_dict.get("DEFAULT", {}))
-            mode_config = pair_config.get(resolved_mode, settings_dict.get("DEFAULT", {}).get(resolved_mode, {}))
-        
-        # Fallbacks if JSON config is missing or incomplete
-        default_sl_mult = 1.5 if resolved_mode == "scalping" else self.ATR_MULTIPLIERS.get(timeframe.upper(), self.DEFAULT_ATR_MULTIPLIER)
-        default_tp_mult = 1.5 if resolved_mode == "scalping" else 3.0
-        
-        sl_multiplier = mode_config.get("sl_atr_multiplier", default_sl_mult)
-        tp_multiplier = mode_config.get("tp_atr_multiplier", default_tp_mult)
+            # Production path — query trained parameters from frxbot_brain.db
+            db_params = get_active_parameters(pair.upper(), resolved_mode)
+
+            if db_params:
+                # Unpack trained multipliers directly from SQLite
+                sl_multiplier = db_params["sl_atr_multiplier"]
+                tp_multiplier = db_params["tp_atr_multiplier"]
+                logger.info(f"Loaded trained parameters for {pair.upper()} ({resolved_mode}) from database.")
+            else:
+                # Smart fail-safe fallback: no trained profile exists for this symbol/mode.
+                # Apply conservative production defaults that guarantee RR >= 1.0.
+                sl_multiplier = 2.0
+                tp_multiplier = 2.0
+                logger.warning(
+                    f"[RISK WARNING] No database rules found for {pair.upper()} ({resolved_mode}). "
+                    f"Applying production safe-mode defaults (SL={sl_multiplier}, TP={tp_multiplier}, BEP=1.5)."
+                )
+                print(
+                    f"[RISK WARNING] No database rules found for {pair.upper()} ({resolved_mode}). "
+                    f"Applying production safe-mode defaults."
+                )
         
         sl_distance = atr * sl_multiplier
 

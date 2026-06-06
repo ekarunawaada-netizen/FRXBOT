@@ -1,26 +1,26 @@
 {
   "XAUUSD": {
     "scalping": {
-      "sl_atr_multiplier": 2.5,
-      "tp_atr_multiplier": 0.8,
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
       "bep_trigger_threshold": 1.5
     },
     "swing": {
       "sl_atr_multiplier": 2.0,
-      "tp_atr_multiplier": 3.0,
-      "bep_trigger_threshold": 1.5
+      "tp_atr_multiplier": 2.5,
+      "bep_trigger_threshold": 2.0
     }
   },
   "EURUSD": {
     "scalping": {
-      "sl_atr_multiplier": 1.5,
-      "tp_atr_multiplier": 1.5,
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
       "bep_trigger_threshold": 1.5
     },
     "swing": {
-      "sl_atr_multiplier": 1.75,
-      "tp_atr_multiplier": 3.0,
-      "bep_trigger_threshold": 1.5
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
+      "bep_trigger_threshold": 2.0
     }
   },
   "DEFAULT": {
@@ -32,6 +32,42 @@
     "swing": {
       "sl_atr_multiplier": 1.75,
       "tp_atr_multiplier": 3.0,
+      "bep_trigger_threshold": 1.5
+    }
+  },
+  "GBPUSD": {
+    "swing": {
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
+      "bep_trigger_threshold": 2.0
+    },
+    "scalping": {
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
+      "bep_trigger_threshold": 1.5
+    }
+  },
+  "USDJPY": {
+    "swing": {
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
+      "bep_trigger_threshold": 2.0
+    },
+    "scalping": {
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
+      "bep_trigger_threshold": 1.5
+    }
+  },
+  "AUDUSD": {
+    "swing": {
+      "sl_atr_multiplier": 1.5,
+      "tp_atr_multiplier": 2.0,
+      "bep_trigger_threshold": 1.5
+    },
+    "scalping": {
+      "sl_atr_multiplier": 2.0,
+      "tp_atr_multiplier": 2.5,
       "bep_trigger_threshold": 1.5
     }
   }

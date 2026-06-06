@@ -1,5 +1,6 @@
 import html
 import logging
+import sqlite3
 from aiogram import Router, types
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.enums import ParseMode
@@ -11,6 +12,7 @@ from engines.technical_engine import TechnicalEngine
 from data.news_fetcher import fetch_economic_calendar
 from core.gemini_client import GeminiAnalyseClient
 from engines.risk_engine import RiskManagementEngine
+from core.database_manager import get_active_parameters, get_latest_regime, DB_PATH, _db_lock
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,57 @@ async def check_user_allowed(user_id: int) -> bool:
     except Exception as e:
         logger.error(f"Database error during whitelist check: {e}")
         return False
+
+def get_market_sentiment(symbol: str) -> dict:
+    """
+    Fetches retail sentiment for the requested symbol.
+    Defaults to 50/50 if the table or symbol is missing.
+    """
+    with _db_lock:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT long_percentage, short_percentage FROM market_sentiment WHERE UPPER(symbol) = ?;",
+                (symbol.upper(),)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return dict(row)
+        except Exception as e:
+            logger.error(f"Database error fetching retail sentiment for {symbol}: {e}")
+    return {"long_percentage": 50.0, "short_percentage": 50.0}
+
+def get_intermarket_correlation_data() -> dict:
+    """
+    Fetches daily price change metrics for DXY and US10Y.
+    Defaults to 0.0% changes if records are missing.
+    """
+    data = {
+        "DXY": {"current_price": 0.0, "daily_change_percent": 0.0},
+        "US10Y": {"current_price": 0.0, "daily_change_percent": 0.0}
+    }
+    with _db_lock:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT ticker, current_price, daily_change_percent FROM intermarket_correlation WHERE ticker IN ('DXY', 'US10Y');"
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            for row in rows:
+                ticker = row["ticker"]
+                data[ticker] = {
+                    "current_price": row["current_price"],
+                    "daily_change_percent": row["daily_change_percent"]
+                }
+        except Exception as e:
+            logger.error(f"Database error fetching intermarket correlation: {e}")
+    return data
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -100,35 +153,126 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
 
     # 2. Extract & validate pair and mode arguments
     # Format: /analisa [PAIR] [MODE]
+    # Supported symbols and modes for the help menu
+    SUPPORTED_SYMBOLS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]
+    SUPPORTED_MODES = ["scalping", "intraday", "swing"]
+
     args_str = command.args
     if not args_str:
+        symbols_list = "  ".join([f"<code>{s}</code>" for s in SUPPORTED_SYMBOLS])
         await message.answer(
-            "<b>❌ Format Salah!</b>\n"
-            "Gunakan format: <code>/analisa [NAMA_PAIR] [MODE]</code>\n"
-            "Contoh: <code>/analisa EURUSD scalping</code> atau <code>/analisa XAUUSD swing</code>",
+            f"📋 <b>FRXBOT Quant Analyzer — Panduan Cepat</b>\n"
+            f"────────────────────────\n"
+            f"<b>Format:</b> <code>/analisa [SYMBOL] [MODE]</code>\n\n"
+            f"🪙 <b>Simbol Aktif:</b>\n{symbols_list}\n\n"
+            f"⚙️ <b>Mode Trading:</b>\n"
+            f"  <code>scalping</code>  — M5 ultra-cepat\n"
+            f"  <code>intraday</code> — M30 intra-hari\n"
+            f"  <code>swing</code>    — H1 posisi menengah\n\n"
+            f"<b>Contoh:</b>\n"
+            f"  <code>/analisa XAUUSD swing</code>\n"
+            f"  <code>/analisa EURUSD scalping</code>\n"
+            f"  <code>/analisa GBPUSD intraday</code>\n"
+            f"────────────────────────\n"
+            f"💡 <i>Jika mode tidak ditentukan, default = swing</i>",
             parse_mode=ParseMode.HTML
         )
         return
 
     parts = [p.strip() for p in args_str.split() if p.strip()]
     pair = parts[0].upper()
-    
-    mode = "swing"
+
+    mode = "swing"  # default mode
     if len(parts) >= 2:
         mode_arg = parts[1].lower()
         if mode_arg in {"sc", "scalping"}:
             mode = "scalping"
+        elif mode_arg in {"id", "intraday"}:
+            mode = "intraday"
         elif mode_arg in {"sw", "swing"}:
             mode = "swing"
 
-    await message.answer(
-        f"⏳ <b>FRXBOT:</b> Memulai analisis <b>[{mode.upper()}]</b> untuk <b>{pair}</b>... Silakan tunggu sebentar.",
-        parse_mode=ParseMode.HTML
+    # ── Quant Dashboard: Dual-Table SQLite Queries ────────────────
+    # Query 1: Trained optimization parameters from pair_optimized_rules
+    db_params = get_active_parameters(pair, mode)
+    if db_params:
+        sl_mult = db_params["sl_atr_multiplier"]
+        tp_mult = db_params["tp_atr_multiplier"]
+        bep_mult = db_params["bep_multiplier"]
+        trained_wr = db_params.get("win_rate", 0.0)
+        trained_pf = db_params.get("profit_factor", 0.0)
+        param_source = "TRAINED"
+    else:
+        # Safe-mode production fallback (guarantees RR >= 1.0)
+        sl_mult, tp_mult, bep_mult = 2.0, 2.0, 1.5
+        trained_wr, trained_pf = 0.0, 0.0
+        param_source = "SAFE-MODE"
+        logger.warning(f"No trained params for {pair} ({mode}). Using safe-mode defaults.")
+
+    # Query 2: Latest market regime from market_regimes_history
+    regime_data = get_latest_regime(pair)
+    if regime_data:
+        regime_state = regime_data["market_state"]
+        regime_atr = regime_data.get("calculated_atr", 0.0)
+        regime_std = regime_data.get("standard_deviation", 0.0)
+    else:
+        regime_state = "UNKNOWN"
+        regime_atr, regime_std = 0.0, 0.0
+
+    # Query 3: Retail Sentiment Ingestion Metrics
+    sentiment = get_market_sentiment(pair)
+    long_percentage = sentiment["long_percentage"]
+    short_percentage = sentiment["short_percentage"]
+    
+    if long_percentage > 60.0:
+        sentiment_label = " (Retail Trapped LONG - Bearish Bias)"
+    elif short_percentage > 60.0:
+        sentiment_label = " (Retail Trapped SHORT - Bullish Bias)"
+    else:
+        sentiment_label = " (Balanced Sentiment)"
+
+    # Query 4: Intermarket Correlation Data
+    intermarket_data = get_intermarket_correlation_data()
+    dxy_change = intermarket_data["DXY"]["daily_change_percent"]
+    us10y_change = intermarket_data["US10Y"]["daily_change_percent"]
+
+    # Regime display emoji mapping
+    regime_emoji_map = {
+        "HIGH_VOLATILITY": "🔴 HIGH VOLATILITY",
+        "TRENDING": "🟢 TRENDING",
+        "NORMAL": "🟡 NORMAL/RANGING",
+        "UNKNOWN": "⚪ UNKNOWN"
+    }
+    regime_display = regime_emoji_map.get(regime_state, f"⚪ {regime_state}")
+
+    # Format performance metrics display
+    wr_display = f"{trained_wr:.2f}%" if trained_wr > 0 else "N/A"
+    pf_display = f"{trained_pf:.2f}" if trained_pf > 0 else "N/A"
+
+    # Build the Quant Dashboard header message
+    quant_dashboard = (
+        f"🏦 <b>FRXBOT QUANT DASHBOARD</b>\n"
+        f"════════════════════════════\n\n"
+        f"🪙 <b>Asset:</b> <code>{pair}</code> | <b>Mode:</b> <code>{mode.upper()}</code>\n"
+        f"☁️ <b>Market Regime:</b> {regime_display}\n"
+        f"   ATR: <code>{regime_atr:.6f}</code> | StdDev: <code>{regime_std:.6f}</code>\n\n"
+        f"👥 Retail Sentiment: {long_percentage}% BUY | {short_percentage}% SELL{sentiment_label}\n\n"
+        f"🎯 <b>Optimal Multipliers</b> <i>({param_source})</i>:\n"
+        f"   SL: <code>{sl_mult}</code> | TP: <code>{tp_mult}</code> | BEP: <code>{bep_mult}</code>\n\n"
+        f"📈 <b>Training Performance:</b>\n"
+        f"   Win Rate: <code>{wr_display}</code> | Profit Factor: <code>{pf_display}</code>\n\n"
+        f"💵 Global Macro: DXY ({dxy_change:+.4f}%) | US10Y ({us10y_change:+.4f}%)\n"
+        f"════════════════════════════\n"
+        f"⏳ Menjalankan analisis <b>[{mode.upper()}]</b> untuk <b>{pair}</b>..."
     )
+    await message.answer(quant_dashboard, parse_mode=ParseMode.HTML)
 
     try:
         # 3. Step A: Price Data Retrieval
-        timeframe = "M5" if mode == "scalping" else "H1"
+        # Resolve timeframe from mode: scalping→M5, intraday→M30, swing→H1
+        timeframe_map = {"scalping": "M5", "intraday": "M30", "swing": "H1"}
+        timeframe = timeframe_map.get(mode, "H1")
+
         logger.info(f"Fetching price data for {pair} in {mode} mode (execution TF: {timeframe})")
         try:
             ohlcv_data = await fetch_ohlcv_with_backoff(pair, timeframe, mode=mode)
@@ -165,7 +309,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
         
         entry_price = float(ohlcv["Close"].iloc[-1])
 
-        # 5. Step C: AI Analysis (Technical from live data + Fundamental from calendar -> Groq)
+        # 5. Step C: AI Analysis (Technical from live data + Fundamental from calendar -> Groq/Gemini)
         logger.info(f"Running AI Technical & Fundamental analysis for {pair} in {mode} mode")
         try:
             # Compute market data context from the OHLCV already fetched
@@ -181,7 +325,7 @@ async def cmd_analisa(message: types.Message, command: CommandObject):
             else:
                 news_text = ""
                 
-            # Pass both technical + fundamental context to unified Groq analysis
+            # Pass both technical + fundamental context to unified Groq/Gemini analysis
             ai_sentiment_dict = await gemini_client.analyse_news_sentiment(
                 pair,
                 economic_context=news_text,

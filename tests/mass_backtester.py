@@ -36,17 +36,16 @@ async def run_backtest_simulation(
 
     timeframe = "M5" if mode == "scalping" else "H1"
     
-    # Load dynamic config
-    from engines.risk_engine import load_pair_settings
-    settings_dict = load_pair_settings()
-    pair_config = settings_dict.get(pair.upper(), settings_dict.get("DEFAULT", {}))
-    mode_config = pair_config.get(mode.lower(), settings_dict.get("DEFAULT", {}).get(mode.lower(), {}))
-    
-    # Apply training loop overrides if provided
+    # Load dynamic BEP config from SQLite brain database or overrides
     if override_settings:
-        mode_config = {**mode_config, **override_settings}
-        
-    bep_threshold = mode_config.get("bep_trigger_threshold", 1.5)
+        bep_threshold = override_settings.get("bep_trigger_threshold", 1.5)
+    else:
+        from core.database_manager import get_active_parameters
+        db_params = get_active_parameters(pair.upper(), mode.lower())
+        if db_params:
+            bep_threshold = db_params.get("bep_multiplier", 1.5)
+        else:
+            bep_threshold = 1.5
 
     # Backtest parameters
     pending_limit_bars = 48 if mode == "scalping" else 24

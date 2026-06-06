@@ -1,127 +1,161 @@
-import os
-import asyncio
-import logging
-from typing import AsyncGenerator
-from contextlib import asynccontextmanager
-import asyncpg
+"""
+db/connection.py — Local SQLite Connection Adapter
 
-from core.config import settings
+Provides async-compatible connection context managers backed by the local
+SQLite database at data/frxbot_brain.db. Replaces the legacy asyncpg
+PostgreSQL connection pool with zero-latency local I/O.
+
+All public function signatures are preserved so existing callers
+(queries.py, add_to_whitelist.py, etc.) continue to work unchanged.
+"""
+
+import os
+import sqlite3
+import logging
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Global variable to store connection pool
-_db_pool: asyncpg.Pool | None = None
-
-# Connection retry settings
-_MAX_INIT_RETRIES = 3
-_INIT_RETRY_DELAY_S = 5  # seconds between retries
+# Resolve the path to our local SQLite database
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DB_PATH = os.path.join(_BASE_DIR, "data", "frxbot_brain.db")
 
 
-async def init_db_pool() -> asyncpg.Pool | None:
+class _SQLiteConnectionWrapper:
     """
-    Initializes the asyncpg connection pool with retry logic.
-    
-    Reads parameters from Pydantic settings (loaded from .env):
-    - DATABASE_URL: PostgreSQL connection string
-    - DB_POOL_MIN: Minimum number of connections (default 2)
-    - DB_POOL_MAX: Maximum number of connections (default 10)
-    
-    Returns the pool on success, or None if all retries fail (non-blocking).
+    Lightweight async-style wrapper around a sqlite3 connection.
+    Exposes fetchval / fetchrow / execute methods matching the asyncpg
+    interface used by queries.py, so existing callers require zero changes.
     """
-    global _db_pool
-    if _db_pool is not None:
-        logger.info("Database pool already initialized.")
-        return _db_pool
 
-    database_url = settings.database_url
-    if not database_url or database_url == "postgresql://postgres:postgres@localhost:5432/forex_bot":
-        logger.warning(f"DATABASE_URL not set or using default fallback: {database_url}")
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+        self._conn.row_factory = sqlite3.Row
 
-    min_size = settings.db_pool_min
-    max_size = settings.db_pool_max
+    async def execute(self, query: str, *args: Any) -> None:
+        """Executes a query (INSERT/UPDATE/DELETE) with positional params."""
+        sql = _convert_pg_placeholders(query)
+        self._conn.execute(sql, args)
+        self._conn.commit()
 
-    for attempt in range(1, _MAX_INIT_RETRIES + 1):
-        try:
-            _db_pool = await asyncio.wait_for(
-                asyncpg.create_pool(
-                    dsn=database_url,
-                    min_size=min_size,
-                    max_size=max_size,
-                    timeout=15.0,        # per-connection acquire timeout
-                    command_timeout=30.0, # per-query timeout
-                ),
-                timeout=20.0  # overall timeout for the entire pool init (DNS + TCP + handshake)
-            )
-            logger.info(f"Database connection pool initialized (min_size={min_size}, max_size={max_size}).")
-            return _db_pool
+    async def fetchval(self, query: str, *args: Any) -> Optional[Any]:
+        """Executes a query and returns the first column of the first row."""
+        sql = _convert_pg_placeholders(query)
+        cursor = self._conn.execute(sql, args)
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        return None
 
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Database pool init timed out (attempt {attempt}/{_MAX_INIT_RETRIES}). "
-                f"DNS or network may be unreachable."
-            )
-        except OSError as e:
-            # Catches getaddrinfo failed, Connection refused, Network unreachable, etc.
-            logger.error(
-                f"Database pool init OS/network error (attempt {attempt}/{_MAX_INIT_RETRIES}): {e}"
-            )
-        except Exception as e:
-            logger.error(
-                f"Database pool init failed (attempt {attempt}/{_MAX_INIT_RETRIES}): {e}"
-            )
+    async def fetchrow(self, query: str, *args: Any) -> Optional[sqlite3.Row]:
+        """Executes a query and returns the first row as a dict-like Row."""
+        sql = _convert_pg_placeholders(query)
+        cursor = self._conn.execute(sql, args)
+        return cursor.fetchone()
 
-        if attempt < _MAX_INIT_RETRIES:
-            logger.info(f"Retrying database connection in {_INIT_RETRY_DELAY_S}s...")
-            await asyncio.sleep(_INIT_RETRY_DELAY_S)
 
-    logger.error(
-        f"All {_MAX_INIT_RETRIES} database connection attempts failed. "
-        f"Bot will continue without database — signal logging and whitelist checks will be unavailable."
-    )
-    _db_pool = None
-    return None
+def _convert_pg_placeholders(query: str) -> str:
+    """
+    Converts PostgreSQL-style positional placeholders ($1, $2, ...) to
+    SQLite-style question mark placeholders (?).
+    Also strips unsupported PostgreSQL clauses like RETURNING.
+    """
+    import re
+    # Remove RETURNING clauses (SQLite uses lastrowid instead)
+    query = re.sub(r'\s+RETURNING\s+\w+\s*;?\s*$', ';', query, flags=re.IGNORECASE)
+    # Replace $N placeholders with ?
+    query = re.sub(r'\$\d+', '?', query)
+    return query
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Public API (preserves legacy function signatures)
+# ──────────────────────────────────────────────────────────────────────
+
+async def init_db_pool() -> bool:
+    """
+    Initializes the local SQLite database and ensures core tables exist.
+    Returns True immediately — no network I/O, no retries needed.
+    Replaces the legacy asyncpg pool initialization.
+    """
+    try:
+        os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(_DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        cursor = conn.cursor()
+
+        # Ensure the whitelist_users table exists locally
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS whitelist_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER UNIQUE NOT NULL,
+                telegram_id INTEGER,
+                username TEXT,
+                full_name TEXT,
+                is_active BOOLEAN DEFAULT 1
+            );
+        """)
+
+        # Ensure the signals_log table exists locally
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS signals_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                mode TEXT,
+                timeframe TEXT,
+                direction TEXT,
+                entry_price REAL,
+                sl_price REAL,
+                tp1_price REAL,
+                tp2_price REAL,
+                lot_size REAL,
+                atr_value REAL,
+                signal_source TEXT,
+                ai_confidence REAL,
+                ai_reasoning TEXT,
+                outcome TEXT DEFAULT 'OPEN',
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        conn.commit()
+        conn.close()
+        logger.info(f"SQLite connection adapter initialized at {_DB_PATH}")
+        return True
+    except Exception as e:
+        logger.error(f"SQLite init error: {e}", exc_info=True)
+        return False
 
 
 async def close_db_pool() -> None:
-    """Closes the asyncpg connection pool gracefully."""
-    global _db_pool
-    if _db_pool is not None:
-        try:
-            await _db_pool.close()
-            logger.info("Database connection pool closed successfully.")
-        except Exception as e:
-            logger.error(f"Error closing database pool: {str(e)}")
-        finally:
-            _db_pool = None
+    """
+    No-op for SQLite — connections are opened/closed per operation.
+    Preserves the legacy function signature for callers like add_to_whitelist.py.
+    """
+    logger.info("SQLite adapter: close_db_pool called (no-op for local SQLite).")
 
 
 @asynccontextmanager
-async def get_db_connection() -> AsyncGenerator[asyncpg.Connection, None]:
+async def get_db_connection() -> AsyncGenerator[_SQLiteConnectionWrapper, None]:
     """
-    Asynchronous context manager to borrow a connection from the pool.
-    
-    Yields:
-        An active asyncpg.Connection object.
-    
-    Raises:
-        RuntimeError: If connection pool is not available after initialization attempt.
-    """
-    global _db_pool
-    if _db_pool is None:
-        logger.warning("Connection pool not initialized. Attempting initialization.")
-        await init_db_pool()
-        if _db_pool is None:
-            raise RuntimeError(
-                "Database connection pool is not available. "
-                "Check DATABASE_URL and network connectivity."
-            )
+    Async context manager that yields a wrapped SQLite connection.
+    Drop-in replacement for the legacy asyncpg pool acquire/release pattern.
 
+    Usage:
+        async with get_db_connection() as conn:
+            await conn.execute("INSERT INTO ...", val1, val2)
+            row = await conn.fetchrow("SELECT ... WHERE user_id = ?", uid)
+    """
+    conn = None
     try:
-        conn = await asyncio.wait_for(_db_pool.acquire(), timeout=10.0)
-    except asyncio.TimeoutError:
-        raise RuntimeError("Timed out waiting to acquire a database connection from the pool.")
-    
-    try:
-        yield conn
+        conn = sqlite3.connect(_DB_PATH)
+        wrapper = _SQLiteConnectionWrapper(conn)
+        yield wrapper
+    except Exception as e:
+        logger.error(f"SQLite connection error: {e}", exc_info=True)
+        raise
     finally:
-        await _db_pool.release(conn)
+        if conn:
+            conn.close()

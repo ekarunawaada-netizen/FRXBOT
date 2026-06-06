@@ -1,13 +1,22 @@
-import json
+"""
+db/queries.py — Signal Logging & Whitelist Queries (SQLite)
+
+All queries now execute against the local SQLite database via
+db/connection.py's async wrapper. No network I/O, no timeouts.
+"""
+
 import logging
-from typing import Dict, Any, Optional
+from typing import Optional
+from datetime import datetime, timezone
+
 from db.connection import get_db_connection
 
 logger = logging.getLogger(__name__)
 
+
 async def is_user_whitelisted(user_id: int) -> bool:
     """
-    Checks if a user is in the whitelist and has an active status.
+    Checks if a user is in the whitelist_users table and has an active status.
 
     Args:
         user_id: The Telegram User ID.
@@ -15,17 +24,15 @@ async def is_user_whitelisted(user_id: int) -> bool:
     Returns:
         True if user exists and is active, False otherwise.
     """
-    query = """
-        SELECT is_active 
-        FROM whitelist_users 
-        WHERE user_id = $1;
-    """
     try:
         async with get_db_connection() as conn:
-            is_active = await conn.fetchval(query, user_id)
+            is_active = await conn.fetchval(
+                "SELECT is_active FROM whitelist_users WHERE user_id = ?;",
+                user_id
+            )
             return bool(is_active)
     except Exception as e:
-        logger.error(f"Error checking whitelist for user {user_id}: {str(e)}")
+        logger.error(f"Error checking whitelist for user {user_id}: {e}")
         return False
 
 
@@ -43,14 +50,14 @@ async def log_signal(
     signal_source: str,
     ai_confidence: Optional[float] = None,
     ai_reasoning: Optional[str] = None
-) -> Optional[str]:
+) -> Optional[int]:
     """
-    Logs a generated signal to the signal_log table.
+    Logs a generated signal into the local SQLite signals_log table.
 
     Args:
         user_id: Telegram User ID.
         pair: Currency pair (e.g. "XAUUSD").
-        timeframe: Signal timeframe (e.g. "H1").
+        timeframe: Signal timeframe (e.g. "H1", "M5").
         direction: Signal direction ("LONG" | "SHORT").
         entry_price: Recommended entry price.
         sl_price: Recommended stop loss price.
@@ -63,23 +70,24 @@ async def log_signal(
         ai_reasoning: Optional reasoning behind the signal.
 
     Returns:
-        The generated UUID of the log record as a string, or None if logging failed.
-    """
-    query = """
-        INSERT INTO signal_log (
-            user_id, pair, timeframe, direction, entry_price, sl_price, 
-            tp1_price, tp2_price, lot_size, atr_value, signal_source, 
-            ai_confidence, ai_reasoning, outcome
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'OPEN'
-        ) RETURNING id;
+        The row ID of the inserted log record, or None if logging failed.
     """
     try:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
         async with get_db_connection() as conn:
-            uuid_val = await conn.fetchval(
-                query,
-                user_id,
-                pair,
+            await conn.execute(
+                """
+                INSERT INTO signals_log (
+                    user_id, symbol, mode, timeframe, direction,
+                    entry_price, sl_price, tp1_price, tp2_price,
+                    lot_size, atr_value, signal_source,
+                    ai_confidence, ai_reasoning, outcome, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?);
+                """,
+                str(user_id),
+                pair.upper(),
+                timeframe,       # mode column stores timeframe context
                 timeframe,
                 direction.upper(),
                 entry_price,
@@ -90,88 +98,15 @@ async def log_signal(
                 atr_value,
                 signal_source.upper(),
                 ai_confidence,
-                ai_reasoning
+                ai_reasoning,
+                timestamp
             )
-            return str(uuid_val) if uuid_val else None
+
+            # Retrieve the last inserted row ID
+            row_id = await conn.fetchval("SELECT last_insert_rowid();")
+            logger.info(f"Signal logged for user {user_id} on {pair} (row {row_id}).")
+            return row_id
+
     except Exception as e:
-        logger.error(f"Error logging signal for user {user_id} on {pair}: {str(e)}")
-        return None
-
-
-async def save_backtest_result(
-    user_id: int,
-    pair: str,
-    timeframe: str,
-    period_years: int,
-    strategy_params: Dict[str, Any],
-    win_rate: float,
-    net_pnl_pct: float,
-    max_drawdown: float,
-    total_trades: int,
-    winning_trades: int,
-    losing_trades: int,
-    avg_rrr: float,
-    sharpe_ratio: float,
-    sortino_ratio: float,
-    raw_report_json: Optional[Dict[str, Any]] = None
-) -> Optional[str]:
-    """
-    Saves a backtest simulation report into the backtest_results table.
-
-    Args:
-        user_id: Telegram User ID of the initiator.
-        pair: Currency pair.
-        timeframe: Timeframe.
-        period_years: Historical range of the backtest.
-        strategy_params: Dict of parameters used (EMA, RSI, MACD bounds).
-        win_rate: Win rate percentage.
-        net_pnl_pct: Net PnL percentage return.
-        max_drawdown: Maximum drawdown percentage.
-        total_trades: Total trades executed.
-        winning_trades: Number of winning trades.
-        losing_trades: Number of losing trades.
-        avg_rrr: Average Risk/Reward ratio.
-        sharpe_ratio: Sharpe Ratio.
-        sortino_ratio: Sortino Ratio.
-        raw_report_json: Optional complete JSON output from vectorbt.
-
-    Returns:
-        The generated UUID of the backtest record as a string, or None if save failed.
-    """
-    query = """
-        INSERT INTO backtest_results (
-            user_id, pair, timeframe, period_years, strategy_params, 
-            win_rate, net_pnl_pct, max_drawdown, total_trades, winning_trades, 
-            losing_trades, avg_rrr, sharpe_ratio, sortino_ratio, raw_report_json
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-        ) RETURNING id;
-    """
-    try:
-        # Convert dictionary settings to JSON strings for jsonb insertion
-        params_json = json.dumps(strategy_params)
-        report_json = json.dumps(raw_report_json) if raw_report_json else None
-
-        async with get_db_connection() as conn:
-            uuid_val = await conn.fetchval(
-                query,
-                user_id,
-                pair,
-                timeframe,
-                period_years,
-                params_json,
-                win_rate,
-                net_pnl_pct,
-                max_drawdown,
-                total_trades,
-                winning_trades,
-                losing_trades,
-                avg_rrr,
-                sharpe_ratio,
-                sortino_ratio,
-                report_json
-            )
-            return str(uuid_val) if uuid_val else None
-    except Exception as e:
-        logger.error(f"Error saving backtest results for user {user_id} on {pair}: {str(e)}")
+        logger.error(f"Error logging signal for user {user_id} on {pair}: {e}")
         return None
